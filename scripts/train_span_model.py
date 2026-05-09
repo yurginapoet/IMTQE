@@ -61,7 +61,7 @@ log = logging.getLogger(__name__)
 
 RANDOM_SEED   = 42
 MODEL_NAME    = "xlm-roberta-base"
-MAX_LENGTH    = 256          # SentencePiece токены, src+sep+mt+sep
+MAX_LENGTH    = 512          # лимит xlm-roberta-base
 LABEL2ID      = {"OK": 0, "BAD-minor": 1, "BAD-major": 2}
 ID2LABEL      = {v: k for k, v in LABEL2ID.items()}
 CLASS_WEIGHTS = [1.0, 2.0, 5.0]   # OK, BAD-minor, BAD-major
@@ -119,11 +119,15 @@ class SpanDataset(Dataset):
         Возвращает словарь с ключами:
           input_ids, attention_mask, labels
         Все тензоры имеют длину max_length (padding/truncation).
+
+        Схема: [CLS] src [SEP] mt [SEP]
+        Метки только на mt-токенах (first-subtoken стратегия).
+        src получает 1/3 бюджета, mt — 2/3 (mt важнее, на нём метки).
+        Финальная страховка гарантирует len <= max_length в любом случае.
         """
         tokenizer = self.tokenizer
 
-        # --- Токенизируем src и mt отдельно чтобы знать границу ---
-        # add_special_tokens=False: спецтокены добавим вручную
+        # Токенизируем src и mt отдельно, без спецтокенов
         src_enc = tokenizer(
             src,
             add_special_tokens=False,
@@ -132,40 +136,40 @@ class SpanDataset(Dataset):
         mt_enc = tokenizer(
             mt,
             add_special_tokens=False,
-            return_offsets_mapping=True,   # нужны offset для маппинга слов
+            return_offsets_mapping=True,
         )
 
-        src_ids  = src_enc["input_ids"]
-        mt_ids   = mt_enc["input_ids"]
-        mt_offsets = mt_enc["offset_mapping"]  # List[(start, end)] в символах mt
+        src_ids    = src_enc["input_ids"]
+        mt_ids     = mt_enc["input_ids"]
+        mt_offsets = mt_enc["offset_mapping"]  # List[(start, end)]
 
-        # Собираем полную последовательность:
-        # [CLS] src [SEP] mt [SEP]
         cls_id = tokenizer.cls_token_id
         sep_id = tokenizer.sep_token_id
+        pad_id = tokenizer.pad_token_id
 
-        # Обрезаем если не влезает (оставляем место для 3 спецтокенов)
+        # Бюджет: max_length - 3 спецтокена ([CLS], [SEP], [SEP])
         max_content = self.max_length - 3
-        # Даём src не более половины, mt — остаток
-        max_src = max_content // 2
-        max_mt  = max_content - min(len(src_ids), max_src)
-        src_ids  = src_ids[:max_src]
-        mt_ids   = mt_ids[:max_mt]
+        # src — не более 1/3, mt — остаток (mt важнее: на нём метки)
+        max_src = max_content // 3
+        max_mt  = max_content - max_src
+
+        src_ids    = src_ids[:max_src]
+        mt_ids     = mt_ids[:max_mt]
         mt_offsets = mt_offsets[:max_mt]
 
+        # Собираем полную последовательность
         input_ids = [cls_id] + src_ids + [sep_id] + mt_ids + [sep_id]
 
-        # Позиция первого токена mt в полной последовательности
-        mt_start_pos = 1 + len(src_ids) + 1   # после [CLS] src [SEP]
+        # Финальная страховка на случай edge cases
+        if len(input_ids) > self.max_length:
+            input_ids = input_ids[:self.max_length - 1] + [sep_id]
 
-        # --- Строим метки ---
+        # Позиция первого mt-токена в полной последовательности
+        mt_start_pos = 1 + len(src_ids) + 1  # [CLS] + src + [SEP]
+
+        # Строим метки: IGNORE везде кроме first-subtoken каждого mt-слова
         labels = [IGNORE_INDEX] * len(input_ids)
 
-        # Маппинг субтоkenов mt → номер spaCy слова
-        # Стратегия: first-subtoken получает метку слова,
-        # остальные → IGNORE_INDEX.
-        # spaCy слова в build_wordlevel разделены пробелами в mt,
-        # определяем принадлежность субтокена слову через char offsets.
         word_subtoken_assigned = self._map_subtokens_to_words(
             mt, mt_offsets, len(word_labels)
         )
@@ -181,14 +185,13 @@ class SpanDataset(Dataset):
             label_str = word_labels[word_idx]
             labels[pos_in_full] = LABEL2ID.get(label_str, IGNORE_INDEX)
 
-        # --- Padding до max_length ---
-        pad_id  = tokenizer.pad_token_id
+        # Padding до max_length
         seq_len = len(input_ids)
         padding = self.max_length - seq_len
 
         attention_mask = [1] * seq_len + [0] * padding
-        input_ids      = input_ids + [pad_id] * padding
-        labels         = labels    + [IGNORE_INDEX] * padding
+        input_ids      = input_ids    + [pad_id]      * padding
+        labels         = labels       + [IGNORE_INDEX] * padding
 
         return {
             "input_ids":      torch.tensor(input_ids,      dtype=torch.long),
