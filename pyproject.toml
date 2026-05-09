@@ -38,6 +38,7 @@ spacy = "^3.8.14"
 pymorphy2 = "^0.9.1"
 pymorphy3 = "^2.0.6"
 pymorphy3-dicts-ru = "^2.4.417150.4580142"
+ngboost = "^0.5.10"
 
 [[tool.poetry.source]]
 name = "pytorch_cpu"
