@@ -2,11 +2,15 @@
 scripts/train_sentence_model.py
 
 Шаг 5 из пайплайна MTQE.
-Обучает XGBoost регрессор на признаках из sentence_da_features.parquet.
+Обучает sentence-level модель на признаках из sentence_da_features.parquet.
 Целевая переменная: score_norm (DA score нормализованный в [0,1]).
 
+Поддерживаемые модели (флаг --model):
+  xgboost  — XGBRegressor, eval_metric=Pearson, точечные предсказания
+  ngboost  — NGBRegressor + Beta distribution, предсказывает (α, β), CI₉₅
+
 Выходные файлы:
-  models/xgboost_sentence.pkl
+  models/xgboost_sentence.pkl   или   models/ngboost_sentence.pkl
   models/shap_explainer.pkl
 
 Метрики:
@@ -14,22 +18,31 @@ scripts/train_sentence_model.py
   Spearman ρ — на HF MQM dedup (внешний тест, только ранговая корреляция)
 
 Запуск:
-  python scripts/train_sentence_model.py
-  python scripts/train_sentence_model.py --data-dir data --models-dir models
+  python scripts/train_sentence_model.py                        # xgboost по умолчанию
+  python scripts/train_sentence_model.py --model ngboost        # ngboost + Beta
+  python scripts/train_sentence_model.py --eval-only            # только внешний тест
+  python scripts/train_sentence_model.py --eval-only --model ngboost
 """
 
 import argparse
 import logging
 import pickle
 from pathlib import Path
-
+from typing import Any
+from xgboost import XGBRegressor
 import numpy as np
 import pandas as pd
 import shap
 from scipy.stats import pearsonr, spearmanr
-from xgboost import XGBRegressor
+from scipy.stats import zscore as scipy_zscore
 
-from src.features.extractor import FEATURE_NAMES_LIGHT
+from xgboost.callback import TrainingCallback as _XGBTrainingCallback
+from src.features.extractor import FEATURE_NAMES
+import xgboost as xgb
+from xgboost import DMatrix
+
+from ngboost import NGBRegressor
+from ngboost.distns import Beta
 
 logging.basicConfig(
     level=logging.INFO,
@@ -39,80 +52,245 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 RANDOM_SEED = 42
+# NGBoost: Beta требует строго (0, 1), не включая границы
+BETA_EPS = 1e-4
 
-# признаки которые есть в parquet — лёгкие (16) или все 22 если считались с --heavy
-# скрипт автоматически берёт те что есть
-HEAVY_FEATURES = [
-    "cosine_similarity", "embedding_distance",
-    "perplexity", "mean_log_prob", "token_ppl_variance", "min_token_log_prob",
-]
 
+# ---------------------------------------------------------------------------
+# Вспомогательные функции
+# ---------------------------------------------------------------------------
 
 def get_feature_cols(df: pd.DataFrame) -> list[str]:
-    """Берём все признаки которые есть в датасете."""
-    from src.features.extractor import FEATURE_NAMES
+    """
+    Берём все признаки из FEATURE_NAMES которые есть в датасете.
+    Импорт здесь чтобы не падать если src.features недоступен при --eval-only.
+    """
     available = [f for f in FEATURE_NAMES if f in df.columns]
-    log.info("Признаков для обучения: %d", len(available))
+    missing   = [f for f in FEATURE_NAMES if f not in df.columns]
+    if missing:
+        log.warning(
+            "Отсутствуют признаки в датасете: %s\n"
+            "Убедись что extract_features.py был запущен без --only и без флагов.",
+            missing,
+        )
+    log.info("Признаков для обучения: %d / %d", len(available), len(FEATURE_NAMES))
     return available
 
 
 def load_data(processed_dir: Path) -> tuple[pd.DataFrame, list[str]]:
     path = processed_dir / "sentence_da_features.parquet"
     if not path.exists():
-        raise FileNotFoundError(f"Не найден файл: {path}. Запусти extract_features.py")
+        raise FileNotFoundError(
+            f"Не найден файл: {path}\n"
+            "Запусти: python scripts/extract_features.py"
+        )
 
     df = pd.read_parquet(path)
     log.info("Загружено: %d строк, %d колонок", len(df), len(df.columns))
+
+    # Диагностика целевой переменной
+    y = df["score_norm"]
+    log.info(
+        "score_norm: mean=%.3f  std=%.3f  min=%.3f  max=%.3f",
+        y.mean(), y.std(), y.min(), y.max(),
+    )
+    log.info("Доля score_norm < 0.5: %.1f%%", (y < 0.5).mean() * 100)
 
     feature_cols = get_feature_cols(df)
     return df, feature_cols
 
 
-def train(
+def _split_arrays(
     df: pd.DataFrame,
     feature_cols: list[str],
-    models_dir: Path,
-) -> XGBRegressor:
+) -> tuple[np.ndarray, ...]:
+    """Возвращает X_train, y_train, X_val, y_val, X_test, y_test."""
     train_df = df[df["split"] == "train"]
     val_df   = df[df["split"] == "val"]
     test_df  = df[df["split"] == "test"]
-
     log.info("train=%d  val=%d  test=%d", len(train_df), len(val_df), len(test_df))
 
-    X_train = train_df[feature_cols].values
-    y_train = train_df["score_norm"].values
-    X_val   = val_df[feature_cols].values
-    y_val   = val_df["score_norm"].values
-    X_test  = test_df[feature_cols].values
-    y_test  = test_df["score_norm"].values
-
-    model = XGBRegressor(
-        n_estimators=1000,
-        learning_rate=0.05,
-        max_depth=6,
-        subsample=0.8,
-        colsample_bytree=0.8,
-        random_state=RANDOM_SEED,
-        early_stopping_rounds=50,
-        eval_metric="rmse",
+    return (
+        train_df[feature_cols].values,
+        train_df["score_norm"].values,
+        val_df[feature_cols].values,
+        val_df["score_norm"].values,
+        test_df[feature_cols].values,
+        test_df["score_norm"].values,
     )
 
-    log.info("Обучение XGBoost...")
+
+def _log_metrics(y_true: np.ndarray, preds: np.ndarray, label: str) -> None:
+    r,   _ = pearsonr(y_true, preds)
+    rho, _ = spearmanr(y_true, preds)
+    log.info("%s — Pearson r=%.4f  Spearman rho=%.4f", label, r, rho)
+
+
+# ---------------------------------------------------------------------------
+# XGBoost
+# ---------------------------------------------------------------------------
+
+
+
+
+class _PearsonCallback(_XGBTrainingCallback):
+    """
+    Early stopping по val Pearson r.
+    Определён на уровне модуля чтобы pickle мог сериализовать модель.
+    Наследуется от TrainingCallback — это требование XGBoost.
+    Внутри after_iteration model — Booster, predict требует DMatrix.
+    """
+
+    def __init__(self, X_val: np.ndarray, y_val: np.ndarray, patience: int = 50) -> None:
+        super().__init__()
+        self.dval      = DMatrix(X_val)
+        self.y_val     = y_val
+        self.patience  = patience
+        self.best_r    = -np.inf
+        self.best_iter = 0
+        self.no_improve = 0
+
+    def after_iteration(self, model: Any, epoch: int, evals_log: Any) -> bool:
+        preds = model.predict(self.dval)
+        r, _  = pearsonr(self.y_val, preds)
+        if r > self.best_r + 1e-5:
+            self.best_r     = r
+            self.best_iter  = epoch
+            self.no_improve = 0
+        else:
+            self.no_improve += 1
+        if epoch % 100 == 0:
+            log.info(
+                "  [%d] val Pearson=%.4f  best=%.4f @ iter %d",
+                epoch, r, self.best_r, self.best_iter,
+            )
+        if self.no_improve >= self.patience:
+            log.info(
+                "Early stopping @ iter %d: Pearson не улучшался %d итераций. Best=%.4f",
+                epoch, self.patience, self.best_r,
+            )
+            return True
+        return False
+
+
+def train_xgboost(
+    df: pd.DataFrame,
+    feature_cols: list[str],
+    models_dir: Path,
+) -> Any:
+
+
+    X_train, y_train, X_val, y_val, X_test, y_test = _split_arrays(df, feature_cols)
+
+    dtrain = xgb.DMatrix(X_train, label=y_train)
+    dval   = xgb.DMatrix(X_val,   label=y_val)
+
+    # Кастомная метрика Pearson для early stopping
+    def pearson_eval(preds, dmatrix):
+        labels = dmatrix.get_label()
+        r, _ = pearsonr(labels, preds)
+        return 'pearson', -r  # минус, т.к. xgb минимизирует
+
+    params = {
+        'objective': 'reg:squarederror',  # регрессия
+        'learning_rate': 0.05,
+        'max_depth': 6,
+        'subsample': 0.8,
+        'colsample_bytree': 0.8,
+        'seed': RANDOM_SEED,
+        'verbosity': 0,
+    }
+
+    evals = [(dtrain, 'train'), (dval, 'val')]
+
+    log.info("Обучение XGBoost (early stopping по val pearson)...")
+    booster = xgb.train(
+        params,
+        dtrain,
+        num_boost_round=1000,
+        evals=evals,
+        early_stopping_rounds=50,
+        feval=pearson_eval,
+        verbose_eval=100,
+    )
+
+    # Сохраняем бустер (не содержит ссылок на DMatrix)
+    model_path = models_dir / "xgboost_sentence.model"
+    booster.save_model(str(model_path))
+    log.info("Модель сохранена в формате .model: %s", model_path)
+
+    # Для обратной совместимости обернём в XGBRegressor (или вернём booster)
+    # XGBRegressor умеет загружать .model
+
+    model = XGBRegressor()
+    model.load_model(str(model_path))
+
+    # Предсказание на тесте
+    dtest = xgb.DMatrix(X_test)
+    preds_test = booster.predict(dtest)
+    _log_metrics(y_test, preds_test, "DA test [XGBoost]")
+
+    return model
+
+
+# ---------------------------------------------------------------------------
+# NGBoost
+# ---------------------------------------------------------------------------
+
+def train_ngboost(
+    df: pd.DataFrame,
+    feature_cols: list[str],
+    models_dir: Path,
+) -> Any:
+
+
+    X_train, y_train, X_val, y_val, X_test, y_test = _split_arrays(df, feature_cols)
+
+    # Beta требует строго (0, 1): клиппинг с запасом
+    y_train = y_train.clip(BETA_EPS, 1 - BETA_EPS)
+    y_val   = y_val.clip(BETA_EPS, 1 - BETA_EPS)
+    y_test  = y_test.clip(BETA_EPS, 1 - BETA_EPS)
+
+    # Asymmetric sample weights: плохие переводы важнее (из архитектуры)
+    TAU, W_HIGH, W_LOW = 0.5, 3.0, 1.0
+    sample_weight = np.where(y_train < TAU, W_HIGH, W_LOW)
+    log.info(
+        "Asymmetric weights: tau=%.2f  w_high=%.1f  w_low=%.1f  "
+        "(плохих примеров: %d / %d)",
+        TAU, W_HIGH, W_LOW,
+        (y_train < TAU).sum(), len(y_train),
+    )
+
+    model = NGBRegressor(
+        Dist=Beta,
+        n_estimators=800,
+        learning_rate=0.05,
+        random_state=RANDOM_SEED,
+        verbose=100,
+        verbose_eval=100,
+    )
+
+    log.info("Обучение NGBoost (Dist=Beta, asymmetric weights)...")
     model.fit(
         X_train, y_train,
-        eval_set=[(X_val, y_val)],
-        verbose=100,
+        X_val=X_val, Y_val=y_val,
+        early_stopping_rounds=50,
+        sample_weight=sample_weight,
     )
 
-    # метрики на test
-    preds_test = model.predict(X_test)
-    r, _   = pearsonr(y_test, preds_test)
-    rho, _ = spearmanr(y_test, preds_test)
-    log.info("DA test — Pearson r=%.4f  Spearman rho=%.4f", r, rho)
+    # Предсказание: ожидание Beta-распределения E[q] = α/(α+β)
+    dist_test = model.pred_dist(X_test)
+    preds_test = dist_test.mean()
+    _log_metrics(y_test, preds_test, "DA test [NGBoost]")
 
-    # сохранение модели
+    # Дополнительно: показываем неопределённость на первых 5 примерах
+    alpha = dist_test.params["alpha"][:5]
+    beta  = dist_test.params["beta"][:5]
+    var   = (alpha * beta) / ((alpha + beta) ** 2 * (alpha + beta + 1))
+    log.info("Uncertainty (Var первых 5 примеров): %s", np.round(var, 4))
+
     models_dir.mkdir(parents=True, exist_ok=True)
-    model_path = models_dir / "xgboost_sentence.pkl"
+    model_path = models_dir / "ngboost_sentence.pkl"
     with open(model_path, "wb") as f:
         pickle.dump(model, f)
     log.info("Модель сохранена: %s", model_path)
@@ -120,19 +298,30 @@ def train(
     return model
 
 
+# ---------------------------------------------------------------------------
+# SHAP (общий для обеих моделей — TreeExplainer работает с обеими)
+# ---------------------------------------------------------------------------
+
 def build_shap_explainer(
-    model: XGBRegressor,
+    model: Any,
     df: pd.DataFrame,
     feature_cols: list[str],
     models_dir: Path,
+    model_type: str,
 ) -> None:
-    log.info("Строим SHAP explainer...")
-    explainer = shap.TreeExplainer(model)
+    log.info("Строим SHAP explainer (model_type=%s)...", model_type)
 
-    # проверяем на train сете
-    X_train = df[df["split"] == "train"][feature_cols].values
-    shap_values = explainer.shap_values(X_train[:100])  # 100 примеров для проверки
-    log.info("SHAP values shape: %s", shap_values.shape)
+    if model_type == "ngboost":
+        # NGBoost: TreeExplainer строится на базовых деревьях (stage 0 = E[α])
+        # shap поддерживает NGBoost начиная с версии 0.40
+        base_learner = model.learners_[0]  # деревья для первого параметра (loc)
+        explainer = shap.TreeExplainer(base_learner)
+    else:
+        explainer = shap.TreeExplainer(model)
+
+    X_sample = df[df["split"] == "train"][feature_cols].values[:100]
+    shap_values = explainer.shap_values(X_sample)
+    log.info("SHAP values shape: %s", np.array(shap_values).shape)
 
     explainer_path = models_dir / "shap_explainer.pkl"
     with open(explainer_path, "wb") as f:
@@ -140,49 +329,150 @@ def build_shap_explainer(
     log.info("SHAP explainer сохранён: %s", explainer_path)
 
 
+# ---------------------------------------------------------------------------
+# Внешний тест на MQM
+# ---------------------------------------------------------------------------
+
 def external_test(
-    model: XGBRegressor,
+    model: Any,
     processed_dir: Path,
     feature_cols: list[str],
+    model_type: str,
 ) -> None:
-    mqm_path = processed_dir / "hf_mqm_dedup.parquet"
+    mqm_path = processed_dir / "hf_mqm_features.parquet"
     if not mqm_path.exists():
-        log.warning("hf_mqm_dedup.parquet не найден - пропускаем внешний тест")
+        log.warning(
+            "hf_mqm_features.parquet не найден — пропускаем внешний тест.\n"
+            "Запусти: python scripts/extract_features.py --only mqm"
+        )
         return
 
     mqm = pd.read_parquet(mqm_path)
+    log.info("MQM датасет: %d строк, %d колонок", len(mqm), len(mqm.columns))
 
-    # берём только признаки которые есть в MQM датасете
     missing = [f for f in feature_cols if f not in mqm.columns]
     if missing:
-        log.warning(
-            "MQM датасет не содержит признаков: %s. "
-            "Запусти extract_features.py на MQM данных.", missing
+        log.error(
+            "В hf_mqm_features.parquet отсутствуют признаки: %s",
+            missing,
         )
         return
 
     X_mqm = mqm[feature_cols].values
-    preds = model.predict(X_mqm)
-    rho, _ = spearmanr(mqm["score"].values, preds)
-    log.info("MQM внешний тест — Spearman rho=%.4f", rho)
+
+    if model_type == "ngboost":
+        preds = model.pred_dist(X_mqm).mean()
+    else:
+        preds = model.predict(X_mqm)
+
+    mqm_score_raw = mqm["score"].values
+
+    log.info(
+        "MQM score raw stats: mean=%.3f  std=%.3f  min=%.3f  max=%.3f",
+        mqm_score_raw.mean(), mqm_score_raw.std(),
+        mqm_score_raw.min(), mqm_score_raw.max(),
+    )
+
+    # --- Нормализация MQM score ---
+    # Вариант 1: zscore по системе (убирает межсистемные сдвиги).
+    # Это стандарт WMT — сравниваем ранги внутри системы, не абсолютные числа.
+    # Нужна колонка "system" в датасете.
+    if "system" in mqm.columns:
+        mqm_score = (
+            mqm.groupby("system")["score"]
+            .transform(lambda x: scipy_zscore(x, ddof=1))
+            .fillna(0)
+            .values
+        )
+        log.info("MQM score нормализован zscore по системе.")
+    else:
+        # Вариант 2: глобальный zscore если нет колонки system
+        mqm_score = scipy_zscore(mqm_score_raw, ddof=1)
+        log.info("MQM score нормализован глобальным zscore (нет колонки 'system').")
+
+    log.info(
+        "MQM score norm stats: mean=%.3f  std=%.3f  min=%.3f  max=%.3f",
+        mqm_score.mean(), mqm_score.std(),
+        mqm_score.min(), mqm_score.max(),
+    )
+    log.info(
+        "Preds stats: mean=%.3f  std=%.3f  min=%.3f  max=%.3f",
+        preds.mean(), preds.std(), preds.min(), preds.max(),
+    )
+
+    # Spearman по нормализованному score
+    # MQM: больше = лучше (0=идеально, отрицательное=плохо)
+    # DA preds: больше = лучше → направление совпадает, инверсия не нужна
+    rho, pvalue = spearmanr(mqm_score, preds)
+    log.info(
+        "MQM внешний тест [%s] — Spearman ρ=%.4f  p=%.4f",
+        model_type, rho, pvalue,
+    )
+
+    # Дополнительно: тест по квантилям (топ-20% vs bottom-20%)
+    # Помогает понять различает ли модель явно плохие и хорошие переводы
+    threshold_lo = np.percentile(mqm_score, 20)
+    threshold_hi = np.percentile(mqm_score, 80)
+    mask = (mqm_score <= threshold_lo) | (mqm_score >= threshold_hi)
+    if mask.sum() > 100:
+        rho_extreme, _ = spearmanr(mqm_score[mask], preds[mask])
+        log.info(
+            "MQM extremes (bottom/top 20%%, n=%d) — Spearman ρ=%.4f",
+            mask.sum(), rho_extreme,
+        )
+
+
+# ---------------------------------------------------------------------------
+# main
+# ---------------------------------------------------------------------------
+
+def _model_pkl_name(model_type: str) -> str:
+    return f"{model_type}_sentence.pkl"
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-dir",   type=Path, default=Path("data"))
     parser.add_argument("--models-dir", type=Path, default=Path("models"))
+    parser.add_argument(
+        "--model",
+        choices=["xgboost", "ngboost"],
+        default="xgboost",
+        help="Какую модель обучать: xgboost (default) или ngboost+Beta",
+    )
+    parser.add_argument(
+        "--eval-only", action="store_true",
+        help="Только внешний тест на MQM, без переобучения",
+    )
     args = parser.parse_args()
 
     processed_dir = args.data_dir / "processed"
+    log.info("=== train_sentence_model.py  [model=%s] ===", args.model)
 
-    log.info("=== train_sentence_model.py ===")
+    if args.eval_only:
+        pkl_path = args.models_dir / _model_pkl_name(args.model)
+        if not pkl_path.exists():
+            raise FileNotFoundError(
+                f"Не найден файл модели: {pkl_path}\n"
+                f"Сначала обучи: python scripts/train_sentence_model.py --model {args.model}"
+            )
+        with open(pkl_path, "rb") as f:
+            model = pickle.load(f)
+        df, feature_cols = load_data(processed_dir)
+        external_test(model, processed_dir, feature_cols, args.model)
+        return
 
     df, feature_cols = load_data(processed_dir)
-    model = train(df, feature_cols, args.models_dir)
-    build_shap_explainer(model, df, feature_cols, args.models_dir)
-    external_test(model, processed_dir, feature_cols)
 
-    log.info("=== Готово. Следующий шаг: scripts/train_span_model.py ===")
+    if args.model == "xgboost":
+        model = train_xgboost(df, feature_cols, args.models_dir)
+    else:
+        model = train_ngboost(df, feature_cols, args.models_dir)
+
+    build_shap_explainer(model, df, feature_cols, args.models_dir, args.model)
+    external_test(model, processed_dir, feature_cols, args.model)
+
+    log.info("=== Готово [%s]. Следующий шаг: scripts/train_span_model.py ===", args.model)
 
 
 if __name__ == "__main__":
