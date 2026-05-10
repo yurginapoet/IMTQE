@@ -12,6 +12,8 @@
 #   ex.load_heavy_models()   # загружает LaBSE и ruGPT-3
 #   result = ex.extract(src, mt)
 
+import logging
+
 import numpy as np
 import spacy
 
@@ -36,6 +38,7 @@ FEATURE_NAMES = FEATURE_NAMES_LIGHT + FEATURE_NAMES_HEAVY  # все 22
 
 class FeatureExtractor:
     def __init__(self) -> None:
+        self._log = logging.getLogger(__name__)
         self.nlp_ru = spacy.load("ru_core_news_sm")
         self.nlp_en = spacy.load("en_core_web_sm", disable=["tagger", "parser", "lemmatizer"])
 
@@ -49,16 +52,16 @@ class FeatureExtractor:
         from sentence_transformers import SentenceTransformer
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
-        print("Загрузка LaBSE...")
+        self._log.info("Загрузка LaBSE...")
         self.labse_model = SentenceTransformer("sentence-transformers/LaBSE")
 
-        print("Загрузка ruGPT-3 Small...")
+        self._log.info("Загрузка ruGPT-3 Small...")
         gpt_name = "sberbank-ai/rugpt3small_based_on_gpt2"
         self.gpt_tokenizer = AutoTokenizer.from_pretrained(gpt_name)
         self.gpt_model     = AutoModelForCausalLM.from_pretrained(gpt_name)
         self.gpt_model.eval()
 
-        print("Тяжёлые модели загружены.")
+        self._log.info("Тяжёлые модели загружены.")
 
     @property
     def heavy_loaded(self) -> bool:

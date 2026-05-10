@@ -58,6 +58,14 @@ FEATURE_TO_MQM: Dict[str, str] = {
     "min_token_log_prob":   "Fluency",
 }
 
+MQM_CATEGORY_RU: Dict[str, str] = {
+    "Accuracy": "Точность (смысл)",
+    "Fluency": "Грамотность/плавность",
+    "Terminology": "Терминология",
+    "Locale": "Локаль/форматирование",
+    "Style": "Стиль/регистр",
+}
+
 FEATURE_NAMES = [
     "length_ratio", "abs_length_diff", "token_count_diff", "src_length", "mt_length",
     "digit_match_ratio", "punct_ratio", "quotes_mismatch", "date_format_error",
