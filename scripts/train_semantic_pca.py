@@ -17,6 +17,7 @@ import gc
 import json
 import logging
 import sys
+import tempfile
 from pathlib import Path
 
 import joblib
@@ -86,25 +87,46 @@ def fit_incremental_pca(
     n_components: int,
     embed_batch_size: int,
     chunk_size: int,
+    checkpoint_path: Path,
+    checkpoint_every: int,
 ) -> tuple[IncrementalPCA, int]:
+    resume_state = None
+    if checkpoint_path.exists():
+        log.info("Найден PCA checkpoint: %s", checkpoint_path)
+        resume_state = joblib.load(checkpoint_path)
+
     if chunk_size < n_components:
         raise ValueError(
             f"chunk_size={chunk_size} должен быть >= n_components={n_components} "
             "для IncrementalPCA.partial_fit"
         )
 
-    ipca = IncrementalPCA(n_components=n_components, batch_size=chunk_size)
+    if resume_state is not None:
+        ipca = resume_state["ipca"]
+        resume_start = int(resume_state["next_start"])
+        processed_rows = int(resume_state["processed_rows"])
+        log.info(
+            "Возобновляем PCA: start=%d processed_rows=%d",
+            resume_start,
+            processed_rows,
+        )
+    else:
+        ipca = IncrementalPCA(n_components=n_components, batch_size=chunk_size)
+        resume_start = 0
+        processed_rows = 0
+
     n_chunks = (len(df) + chunk_size - 1) // chunk_size
 
     progress = tqdm(
-        iter_pair_chunks(df, chunk_size),
+        iter_pair_chunks(df.iloc[resume_start:].reset_index(drop=True), chunk_size),
         total=n_chunks,
         desc="PCA fit chunks",
         unit="chunk",
+        initial=resume_start // chunk_size,
     )
 
-    processed_rows = 0
-    for chunk_idx, (_, pairs) in enumerate(progress, start=1):
+    for chunk_idx, (relative_start, pairs) in enumerate(progress, start=1):
+        absolute_start = resume_start + relative_start
         diff_vectors = neural.build_difference_vectors(
             pairs,
             encoder,
@@ -132,7 +154,32 @@ def fit_incremental_pca(
                 len(pairs),
             )
 
+        if checkpoint_every > 0 and (chunk_idx % checkpoint_every == 0):
+            save_checkpoint_atomic(
+                checkpoint_path,
+                {
+                    "ipca": ipca,
+                    "next_start": absolute_start + len(pairs),
+                    "processed_rows": processed_rows,
+                    "chunk_size": chunk_size,
+                    "n_components": n_components,
+                },
+            )
+            log.info(
+                "PCA checkpoint сохранён: next_start=%d processed_rows=%d",
+                absolute_start + len(pairs),
+                processed_rows,
+            )
+
     return ipca, processed_rows
+
+
+def save_checkpoint_atomic(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=path.parent, suffix=".tmp", delete=False) as tmp:
+        tmp_path = Path(tmp.name)
+    joblib.dump(payload, tmp_path)
+    tmp_path.replace(path)
 
 
 def main() -> None:
@@ -142,6 +189,7 @@ def main() -> None:
     parser.add_argument("--n-components", type=int, default=neural.SEMANTIC_VECTOR_SIZE)
     parser.add_argument("--batch-size", type=int, default=DEFAULT_EMBED_BATCH_SIZE)
     parser.add_argument("--chunk-size", type=int, default=DEFAULT_CHUNK_SIZE)
+    parser.add_argument("--checkpoint-every", type=int, default=5)
     parser.add_argument("--device", type=str, default=None, help='Например "cuda" или "cpu"')
     parser.add_argument("--seed", type=int, default=RANDOM_SEED)
     parser.add_argument("--max-rows", type=int, default=None)
@@ -151,10 +199,14 @@ def main() -> None:
     models_dir = args.models_dir
     out_path = models_dir / "semantic_pca.pkl"
     meta_path = models_dir / "semantic_pca_meta.json"
+    checkpoint_path = models_dir / "semantic_pca.resume.joblib"
 
     if out_path.exists() and not args.force:
         log.info("%s уже существует - пропускаем. Используй --force для пересчёта.", out_path)
         return
+
+    if args.force and checkpoint_path.exists():
+        checkpoint_path.unlink()
 
     processed_dir = args.data_dir / "processed"
     input_path = resolve_input_path(processed_dir)
@@ -169,6 +221,7 @@ def main() -> None:
         args.batch_size,
         args.chunk_size,
     )
+    log.info("Checkpoint каждые %d chunk(ов)", args.checkpoint_every)
 
     df = load_training_frame(input_path, max_rows=args.max_rows)
     log.info("Пар для PCA: %d", len(df))
@@ -195,6 +248,8 @@ def main() -> None:
         n_components=n_components,
         embed_batch_size=args.batch_size,
         chunk_size=args.chunk_size,
+        checkpoint_path=checkpoint_path,
+        checkpoint_every=args.checkpoint_every,
     )
 
     models_dir.mkdir(parents=True, exist_ok=True)
@@ -220,6 +275,9 @@ def main() -> None:
     if explained_sum is not None:
         log.info("Explained variance ratio sum: %.4f", explained_sum)
     log.info("Метаданные сохранены: %s", meta_path)
+    if checkpoint_path.exists():
+        checkpoint_path.unlink()
+        log.info("Временный checkpoint удалён: %s", checkpoint_path)
 
 
 if __name__ == "__main__":
