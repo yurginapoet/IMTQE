@@ -42,6 +42,11 @@ The system follows a modular pipeline:
 6. Explanation Layer (SHAP)
 7. Оценка, типы ошибок + вклад признаков
 
+Semantic extension:
+- the sentence-level feature vector can be extended from `22` to `86`
+- `64` extra dimensions come from MiniLM semantic embeddings reduced with PCA
+- the training sequence is documented in [architecture_semantic_extension.md](architecture_semantic_extension.md)
+
 
 ---
 
@@ -242,4 +247,3 @@ Unlike black-box approaches, it explicitly shows:
 - where errors occur
 - what type of errors they are
 - how they affect the final score
-

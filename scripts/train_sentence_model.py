@@ -27,22 +27,28 @@ scripts/train_sentence_model.py
 import argparse
 import logging
 import pickle
+import sys
 from pathlib import Path
 from typing import Any
-from xgboost import XGBRegressor
+
 import numpy as np
 import pandas as pd
 import shap
 from scipy.stats import pearsonr, spearmanr
 from scipy.stats import zscore as scipy_zscore
-
-from xgboost.callback import TrainingCallback as _XGBTrainingCallback
-from src.features.extractor import FEATURE_NAMES
 import xgboost as xgb
 from xgboost import DMatrix
+from xgboost import XGBRegressor
+from xgboost.callback import TrainingCallback as _XGBTrainingCallback
 
 from ngboost import NGBRegressor
 from ngboost.distns import Beta
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from src.features.schema import FEATURE_NAMES
 
 logging.basicConfig(
     level=logging.INFO,
@@ -126,13 +132,6 @@ def _log_metrics(y_true: np.ndarray, preds: np.ndarray, label: str) -> None:
     log.info("%s — Pearson r=%.4f  Spearman rho=%.4f", label, r, rho)
 
 
-# ---------------------------------------------------------------------------
-# XGBoost
-# ---------------------------------------------------------------------------
-
-
-
-
 class _PearsonCallback(_XGBTrainingCallback):
     """
     Early stopping по val Pearson r.
@@ -192,22 +191,22 @@ def train_xgboost(
         return 'pearson', -r  # минус, т.к. xgb минимизирует
 
     params = {
-        'objective': 'reg:squarederror',  # регрессия
-        'learning_rate': 0.05,
-        'max_depth': 6,
-        'subsample': 0.8,
-        'colsample_bytree': 0.8,
-        'seed': RANDOM_SEED,
-        'verbosity': 0,
+        "objective": "reg:squarederror",
+        "learning_rate": 0.03,
+        "max_depth": 6,
+        "subsample": 0.8,
+        "colsample_bytree": 0.8,
+        "seed": RANDOM_SEED,
+        "verbosity": 0,
     }
 
-    evals = [(dtrain, 'train'), (dval, 'val')]
+    evals = [(dtrain, "train"), (dval, "val")]
 
     log.info("Обучение XGBoost (early stopping по val pearson)...")
     booster = xgb.train(
         params,
         dtrain,
-        num_boost_round=1000,
+        num_boost_round=500,
         evals=evals,
         early_stopping_rounds=50,
         feval=pearson_eval,
@@ -218,9 +217,6 @@ def train_xgboost(
     model_path = models_dir / "xgboost_sentence.model"
     booster.save_model(str(model_path))
     log.info("Модель сохранена в формате .model: %s", model_path)
-
-    # Для обратной совместимости обернём в XGBRegressor (или вернём booster)
-    # XGBRegressor умеет загружать .model
 
     model = XGBRegressor()
     model.load_model(str(model_path))
@@ -430,6 +426,28 @@ def _model_pkl_name(model_type: str) -> str:
     return f"{model_type}_sentence.pkl"
 
 
+def _load_model_for_eval(model_type: str, models_dir: Path) -> Any:
+    if model_type == "xgboost":
+        model_path = models_dir / "xgboost_sentence.model"
+        if not model_path.exists():
+            raise FileNotFoundError(
+                f"Не найден файл модели: {model_path}\n"
+                "Сначала обучи: python scripts/train_sentence_model.py --model xgboost"
+            )
+        model = XGBRegressor()
+        model.load_model(str(model_path))
+        return model
+
+    model_path = models_dir / _model_pkl_name(model_type)
+    if not model_path.exists():
+        raise FileNotFoundError(
+            f"Не найден файл модели: {model_path}\n"
+            f"Сначала обучи: python scripts/train_sentence_model.py --model {model_type}"
+        )
+    with open(model_path, "rb") as f:
+        return pickle.load(f)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-dir",   type=Path, default=Path("data"))
@@ -450,14 +468,7 @@ def main() -> None:
     log.info("=== train_sentence_model.py  [model=%s] ===", args.model)
 
     if args.eval_only:
-        pkl_path = args.models_dir / _model_pkl_name(args.model)
-        if not pkl_path.exists():
-            raise FileNotFoundError(
-                f"Не найден файл модели: {pkl_path}\n"
-                f"Сначала обучи: python scripts/train_sentence_model.py --model {args.model}"
-            )
-        with open(pkl_path, "rb") as f:
-            model = pickle.load(f)
+        model = _load_model_for_eval(args.model, args.models_dir)
         df, feature_cols = load_data(processed_dir)
         external_test(model, processed_dir, feature_cols, args.model)
         return

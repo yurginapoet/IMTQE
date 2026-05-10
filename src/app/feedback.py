@@ -51,7 +51,7 @@ def save_feedback(
         "end_char":     end_char,
         "error_type":   error_type,
         "severity":     severity,
-        "features":     features,       # 22 признака — не пересчитываем при дообучении
+        "features":     features,       # полный набор признаков — не пересчитываем при дообучении
         "word_logprobs": word_logprobs, # per-word logprobs — не пересчитываем
     }
 

@@ -157,13 +157,11 @@ class Predictor:
         if not src and not mt:
             return _empty_result(src, mt)
 
-        # 1. Извлечение признаков (22 + word_logprobs)
+        # 1. Извлечение признаков
         feats = self.extractor.extract(src, mt)
 
         # 2. Sentence-level score + SHAP
         sentence_pred = self.sentence_model.predict(feats["vector"])
-        # sentence_pred — это объект с атрибутами: score, ci_low, ci_high, uncertainty, shap_values (опционально)
-
         # 3. Слова mt для span-модели и рендера
         #    Используем токенизацию FeatureExtractor (spaCy) для согласованности
         mt_words = _get_mt_words(feats, mt)
@@ -185,24 +183,10 @@ class Predictor:
             "features": feats.get("raw", {}),
             "word_logprobs": word_logprobs if word_logprobs else [],
         }
-        if hasattr(sentence_pred, "shap_values") and sentence_pred.shap_values is not None:
-            # Преобразуем массив SHAP в словарь, если возможно, иначе сохраняем как массив
-            shap_vals = sentence_pred.shap_values
-            if isinstance(shap_vals, np.ndarray) and shap_vals.ndim == 1 and len(shap_vals) == 22:
-                # Если известны имена признаков, можно превратить в dict
-                feature_names = [
-                    "length_ratio", "abs_length_diff", "token_count_diff", "src_length", "mt_length",
-                    "digit_match_ratio", "punct_ratio", "quotes_mismatch", "date_format_error",
-                    "oov_ratio", "type_token_ratio", "avg_token_length", "entity_overlap_ratio",
-                    "agreement_errors", "syntax_depth", "formal_ratio", "cosine_similarity",
-                    "embedding_distance", "perplexity", "mean_log_prob", "token_ppl_variance",
-                    "min_token_log_prob"
-                ]
-                debug_info["shap_values"] = {name: float(val) for name, val in zip(feature_names, shap_vals)}
-            else:
-                debug_info["shap_values"] = shap_vals.tolist() if isinstance(shap_vals, np.ndarray) else shap_vals
-        else:
-            debug_info["shap_values"] = None
+        debug_info["shap_values"] = _serialize_shap_values(
+            getattr(sentence_pred, "shap_values", None),
+            self.sentence_model.feature_names,
+        )
 
         return _build_ui_result(src, mt, mt_words, overall, debug_info)
 
@@ -252,23 +236,10 @@ class Predictor:
                 "features": feats.get("raw", {}),
                 "word_logprobs": word_logprobs if word_logprobs else [],
             }
-            if hasattr(sentence_pred, "shap_values") and sentence_pred.shap_values is not None:
-                # Аналогично преобразуем SHAP
-                shap_vals = sentence_pred.shap_values
-                if isinstance(shap_vals, np.ndarray) and shap_vals.ndim == 1 and len(shap_vals) == 22:
-                    feature_names = [
-                        "length_ratio", "abs_length_diff", "token_count_diff", "src_length", "mt_length",
-                        "digit_match_ratio", "punct_ratio", "quotes_mismatch", "date_format_error",
-                        "oov_ratio", "type_token_ratio", "avg_token_length", "entity_overlap_ratio",
-                        "agreement_errors", "syntax_depth", "formal_ratio", "cosine_similarity",
-                        "embedding_distance", "perplexity", "mean_log_prob", "token_ppl_variance",
-                        "min_token_log_prob"
-                    ]
-                    debug_info["shap_values"] = {name: float(val) for name, val in zip(feature_names, shap_vals)}
-                else:
-                    debug_info["shap_values"] = shap_vals.tolist() if isinstance(shap_vals, np.ndarray) else shap_vals
-            else:
-                debug_info["shap_values"] = None
+            debug_info["shap_values"] = _serialize_shap_values(
+                getattr(sentence_pred, "shap_values", None),
+                self.sentence_model.feature_names,
+            )
 
             results.append(_build_ui_result(src, mt, mt_words, overall, debug_info))
 
@@ -447,3 +418,19 @@ def _escape_html(text: str) -> str:
             .replace('"', "&quot;")
             .replace("'", "&#39;")
     )
+
+
+def _serialize_shap_values(
+    shap_values: Any,
+    feature_names: Sequence[str],
+) -> dict[str, float] | list[float] | None:
+    if shap_values is None:
+        return None
+    if isinstance(shap_values, np.ndarray):
+        if shap_values.ndim == 1 and len(shap_values) == len(feature_names):
+            return {
+                name: float(value)
+                for name, value in zip(feature_names, shap_values, strict=False)
+            }
+        return shap_values.tolist()
+    return shap_values

@@ -14,8 +14,8 @@ const detailTitle = document.getElementById('detail-segment-title');
 const detailContent = document.getElementById('detail-content');
 const closeDetailBtn = document.getElementById('close-detail-btn');
 
-// Человеко-читаемые названия признаков (22 шт, порядок как в feature_extractor)
-const FEATURE_NAMES = {
+// Человеко-читаемые названия признаков
+const FEATURE_LABELS = {
     length_ratio: 'Соотношение длин (mt/src)',
     abs_length_diff: 'Абсолютная разница длин',
     token_count_diff: 'Разница в количестве токенов',
@@ -39,6 +39,15 @@ const FEATURE_NAMES = {
     token_ppl_variance: 'Дисперсия вероятностей',
     min_token_log_prob: 'Минимальный log prob'
 };
+
+function getFeatureDisplayName(key) {
+    if (FEATURE_LABELS[key]) return FEATURE_LABELS[key];
+    if (key.startsWith('semantic_')) {
+        const suffix = key.split('_')[1] || '';
+        return `Semantic PCA ${suffix}`;
+    }
+    return key;
+}
 
 // ---------- Инициализация ----------
 function init() {
@@ -270,9 +279,10 @@ async function renderDetail(segmentId) {
     if (seg.cache && seg.cache.features) {
         const features = seg.cache.features;
         const shapValues = seg.cache.shap_values || {}; // может быть массив или объект
-        html += `<h4>Детальные признаки (22)</h4><div class="feature-list">`;
+        const featureCount = Object.keys(features).length;
+        html += `<h4>Детальные признаки (${featureCount})</h4><div class="feature-list">`;
         for (const [key, value] of Object.entries(features)) {
-            const displayName = FEATURE_NAMES[key] || key;
+            const displayName = getFeatureDisplayName(key);
             let shapValue = 0;
             if (shapValues[key] !== undefined) shapValue = shapValues[key];
             else if (Array.isArray(shapValues) && typeof shapValues[0] === 'number') {

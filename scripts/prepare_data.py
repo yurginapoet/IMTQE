@@ -101,13 +101,13 @@ def stratified_split(
 
 # ── шаг 1: HF DA
 
-def load_hf_da(processed_dir: Path, seed: int) -> pd.DataFrame:
+def load_hf_da(processed_dir: Path, seed: int, force: bool = False) -> pd.DataFrame:
     """
     Загружает RicardoRei/wmt-da-human-evaluation, фильтрует EN-RU,
     нормализует score min-max по train-сету, добавляет split.
     """
     out_path = processed_dir / "sentence_da.parquet"
-    if out_path.exists():
+    if out_path.exists() and not force:
         log.info("HF DA уже существует: %s — пропускаем загрузку", out_path)
         return pd.read_parquet(out_path)
 
@@ -180,14 +180,14 @@ def load_hf_da(processed_dir: Path, seed: int) -> pd.DataFrame:
 
 # ── шаг 2: HF MQM───────────────────────
 
-def load_hf_mqm(processed_dir: Path) -> pd.DataFrame:
+def load_hf_mqm(processed_dir: Path, force: bool = False) -> pd.DataFrame:
     """
     Загружает RicardoRei/wmt-mqm-human-evaluation, фильтрует EN-RU,
     отбирает строки с валидным score, сохраняет как hf_mqm_raw.parquet.
     Дедупликация (пересечение с DA train) выполняется в dedup_mqm.py.
     """
     out_path = processed_dir / "hf_mqm_raw.parquet"
-    if out_path.exists():
+    if out_path.exists() and not force:
         log.info("HF MQM уже существует: %s — пропускаем загрузку", out_path)
         return pd.read_parquet(out_path)
 
@@ -264,6 +264,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--skip-mqm", action="store_true", help="Пропустить загрузку HF MQM"
     )
+    p.add_argument(
+        "--force", action="store_true",
+        help="Пересоздать parquet-файлы даже если они уже существуют",
+    )
     return p.parse_args()
 
 
@@ -276,7 +280,7 @@ def main() -> None:
 
     if not args.skip_da:
         log.info("── Шаг 1: HF DA ──────────────────────────────")
-        da_df = load_hf_da(processed_dir, seed=args.seed)
+        da_df = load_hf_da(processed_dir, seed=args.seed, force=args.force)
         log.info(
             "HF DA готов: %d строк  |  train=%d  val=%d  test=%d",
             len(da_df),
@@ -289,7 +293,7 @@ def main() -> None:
 
     if not args.skip_mqm:
         log.info("── Шаг 2: HF MQM ─────────────────────────────")
-        mqm_df = load_hf_mqm(processed_dir)
+        mqm_df = load_hf_mqm(processed_dir, force=args.force)
         log.info("HF MQM готов: %d строк", len(mqm_df))
     else:
         log.info("── Шаг 2: HF MQM пропущен (--skip-mqm) ───────")

@@ -11,8 +11,10 @@ class Config:
     SENTENCE_TRAIN = PROCESSED_DIR / "sentence_train.parquet"
     SENTENCE_DEV = PROCESSED_DIR / "sentence_dev.parquet"
 
-    # Пути к тяжёлым моделям
-    LABSE_PATH = MODELS_DIR / "LaBSE"
-    RUGPT_PATH = MODELS_DIR / "rugpt3small_based_on_gpt2"
+    # Артефакты и имена моделей для sentence-level признаков
+    LABSE_MODEL_NAME = "sentence-transformers/LaBSE"
+    RUGPT_MODEL_NAME = "sberbank-ai/rugpt3small_based_on_gpt2"
+    SEMANTIC_ENCODER_NAME = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+    SEMANTIC_PCA_PATH = MODELS_DIR / "semantic_pca.pkl"
 
 Config.MODELS_DIR.mkdir(exist_ok=True)

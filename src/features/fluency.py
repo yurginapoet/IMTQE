@@ -48,6 +48,9 @@ def _get_word_logprobs(
     if input_ids.shape[1] == 0:
         return [0.0] * len(spacy_words)
 
+    device = next(model.parameters()).device
+    input_ids = input_ids.to(device)
+
     # logprobs всех токенов через авторегрессионное разложение
     with torch.no_grad():
         outputs = model(input_ids)

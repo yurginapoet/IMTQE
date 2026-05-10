@@ -145,10 +145,11 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-dir", type=Path, default=Path("data"))
     parser.add_argument("--seed", type=int, default=RANDOM_SEED)
+    parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
 
     out_path = args.data_dir / "processed" / "wordlevel_train.parquet"
-    if out_path.exists():
+    if out_path.exists() and not args.force:
         log.info("Файл уже существует: %s - пропускаем", out_path)
         return
 

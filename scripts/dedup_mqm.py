@@ -31,12 +31,13 @@ log = logging.getLogger(__name__)
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-dir", type=Path, default=Path("data"))
+    parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
 
     processed_dir = args.data_dir / "processed"
     out_path      = processed_dir / "hf_mqm_dedup.parquet"
 
-    if out_path.exists():
+    if out_path.exists() and not args.force:
         log.info("Файл уже существует: %s - пропускаем", out_path)
         return
 
