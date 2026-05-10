@@ -141,6 +141,9 @@ async def evaluate(
 
     data = result.to_dict()
     data["elapsed_sec"] = round(elapsed, 3)
+    # Добавляем debug явно (для feedback)
+    if "debug" not in data:
+        data["debug"] = result.debug
     return data
 
 

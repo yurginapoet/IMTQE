@@ -18,6 +18,10 @@ import numpy as np
 import spacy
 
 from src.features import fluency, formatting, linguistic, semantic, structural
+from sentence_transformers import SentenceTransformer
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from src.config import Config
+
 
 # порядок признаков — должен совпадать с разделом 5.1 архитектуры
 FEATURE_NAMES_LIGHT = [
@@ -48,18 +52,26 @@ class FeatureExtractor:
         self.gpt_model    = None
 
     def load_heavy_models(self) -> None:
-        """Загружает LaBSE и ruGPT-3. Вызывать один раз при старте."""
+        """Загружает LaBSE и ruGPT-3."""
         from sentence_transformers import SentenceTransformer
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
         self._log.info("Загрузка LaBSE...")
-        self.labse_model = SentenceTransformer("sentence-transformers/LaBSE")
+        try:
+            self.labse_model = SentenceTransformer("sentence-transformers/LaBSE")
+            self._log.info("LaBSE загружена (из кэша HF)")
+        except Exception as e:
+            self._log.error("Не удалось загрузить LaBSE: %s", e)
 
         self._log.info("Загрузка ruGPT-3 Small...")
-        gpt_name = "sberbank-ai/rugpt3small_based_on_gpt2"
-        self.gpt_tokenizer = AutoTokenizer.from_pretrained(gpt_name)
-        self.gpt_model     = AutoModelForCausalLM.from_pretrained(gpt_name)
-        self.gpt_model.eval()
+        try:
+            gpt_name = "sberbank-ai/rugpt3small_based_on_gpt2"
+            self.gpt_tokenizer = AutoTokenizer.from_pretrained(gpt_name)
+            self.gpt_model = AutoModelForCausalLM.from_pretrained(gpt_name)
+            self.gpt_model.eval()
+            self._log.info("ruGPT-3 загружен (из кэша HF)")
+        except Exception as e:
+            self._log.error("Не удалось загрузить ruGPT-3: %s", e)
 
         self._log.info("Тяжёлые модели загружены.")
 

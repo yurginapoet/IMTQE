@@ -11,5 +11,8 @@ class Config:
     SENTENCE_TRAIN = PROCESSED_DIR / "sentence_train.parquet"
     SENTENCE_DEV = PROCESSED_DIR / "sentence_dev.parquet"
 
+    # Пути к тяжёлым моделям
+    LABSE_PATH = MODELS_DIR / "LaBSE"
+    RUGPT_PATH = MODELS_DIR / "rugpt3small_based_on_gpt2"
 
 Config.MODELS_DIR.mkdir(exist_ok=True)

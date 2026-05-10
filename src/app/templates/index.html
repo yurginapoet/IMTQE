@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MTQE — Quality Estimation for MT</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="app">
+        <header>
+            <h1>MTQE <span class="subtitle">Оценка качества перевода</span></h1>
+            <div id="status" class="status loading">⏳ Загрузка моделей...</div>
+        </header>
+
+        <div class="table-container">
+            <table id="segments-table">
+                <thead>
+                    <tr>
+                        <th class="col-num">#</th>
+                        <th class="col-src">Оригинал (EN)</th>
+                        <th class="col-mt">Перевод (RU)</th>
+                        <th class="col-score">Score</th>
+                        <th class="col-actions"></th>
+                    </tr>
+                </thead>
+                <tbody id="segments-tbody"></tbody>
+            </table>
+        </div>
+
+        <div class="toolbar">
+            <button id="add-segment-btn" class="btn-primary">+ Добавить строку</button>
+            <button id="eval-all-btn" class="btn-secondary">Оценить все сегменты</button>
+        </div>
+
+        <!-- Sticky bottom panel (детали сегмента) -->
+        <div id="detail-panel" class="detail-panel">
+            <div class="detail-header">
+                <h3 id="detail-segment-title">Детали сегмента</h3>
+                <button id="close-detail-btn" class="close-btn" title="Свернуть">▼</button>
+            </div>
+            <div id="detail-content" class="detail-content">
+                <p class="placeholder">Выберите сегмент, чтобы увидеть подробности</p>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
