@@ -2,23 +2,51 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import joblib
 import numpy as np
-from sentence_transformers import SentenceTransformer
+import torch
 
 from src.config import Config
 from src.features.schema import SEMANTIC_FEATURE_NAMES
 
+if TYPE_CHECKING:
+    from sentence_transformers import SentenceTransformer
+
 SEMANTIC_VECTOR_SIZE = len(SEMANTIC_FEATURE_NAMES)
+log = logging.getLogger(__name__)
+
+
+def resolve_device(device: str | None = None) -> str:
+    if device:
+        return device
+    return "cuda" if torch.cuda.is_available() else "cpu"
 
 
 def load_encoder(
     model_name: str = Config.SEMANTIC_ENCODER_NAME,
     device: str | None = None,
-) -> SentenceTransformer:
-    return SentenceTransformer(model_name, device=device)
+) -> "SentenceTransformer":
+    from sentence_transformers import SentenceTransformer
+
+    resolved_device = resolve_device(device)
+    log.info("Загрузка semantic encoder на device=%s", resolved_device)
+
+    if resolved_device.startswith("cuda"):
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+
+    model = SentenceTransformer(model_name, device=resolved_device)
+    if resolved_device.startswith("cuda"):
+        try:
+            model.half()
+            log.info("MiniLM переведён в float16 для CUDA inference")
+        except Exception as exc:
+            log.warning("Не удалось перевести MiniLM в float16: %s", exc)
+    return model
 
 
 def load_pca(path: str | Path = Config.SEMANTIC_PCA_PATH):
@@ -33,8 +61,9 @@ def load_pca(path: str | Path = Config.SEMANTIC_PCA_PATH):
 
 def build_difference_vectors(
     pairs: list[tuple[str, str]],
-    encoder: SentenceTransformer,
+    encoder: "SentenceTransformer",
     batch_size: int = 64,
+    show_progress_bar: bool = False,
 ) -> np.ndarray:
     if not pairs:
         return np.zeros((0, 384), dtype=np.float32)
@@ -46,13 +75,13 @@ def build_difference_vectors(
         src_texts,
         batch_size=batch_size,
         convert_to_numpy=True,
-        show_progress_bar=False,
+        show_progress_bar=show_progress_bar,
     )
     mt_embs = encoder.encode(
         mt_texts,
         batch_size=batch_size,
         convert_to_numpy=True,
-        show_progress_bar=False,
+        show_progress_bar=show_progress_bar,
     )
     return np.abs(src_embs - mt_embs).astype(np.float32)
 
@@ -73,7 +102,7 @@ def vector_to_feature_dict(vector: np.ndarray) -> dict[str, float]:
 def extract(
     src: str,
     mt: str,
-    encoder: SentenceTransformer,
+    encoder: "SentenceTransformer",
     pca,
 ) -> dict[str, float]:
     projected = extract_batch([(src, mt)], encoder, pca, batch_size=1)
@@ -82,7 +111,7 @@ def extract(
 
 def extract_batch(
     pairs: list[tuple[str, str]],
-    encoder: SentenceTransformer,
+    encoder: "SentenceTransformer",
     pca,
     batch_size: int = 64,
 ) -> list[dict[str, float]]:

@@ -47,6 +47,7 @@ def extract_for_df(
     mt_col: str,
     extractor: FeatureExtractor,
     batch_size: int,
+    progress_desc: str,
 ) -> pd.DataFrame:
     """
     Извлекает все активные признаки для всех строк df батчами.
@@ -59,7 +60,7 @@ def extract_for_df(
 
     pairs = list(zip(df[src_col].astype(str), df[mt_col].astype(str), strict=False))
 
-    for start in tqdm(range(0, n, batch_size), desc="Батчи"):
+    for start in tqdm(range(0, n, batch_size), desc=progress_desc, unit="batch"):
         batch = pairs[start : start + batch_size]
         results = extractor.extract_batch(batch)
         for idx, result in enumerate(results):
@@ -108,6 +109,7 @@ def process_dataset(
         mt_col=mt_col,
         extractor=extractor,
         batch_size=batch_size,
+        progress_desc=f"{name} feature batches",
     )
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
