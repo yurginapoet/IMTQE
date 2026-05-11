@@ -19,17 +19,21 @@ scripts/prepare_data.py
 import argparse
 import hashlib
 import logging
+import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 from datasets import load_dataset
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)s  %(message)s",
-    datefmt="%H:%M:%S",
-)
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from src.bootstrap import init_script_runtime
+from src.determinism import seed_everything
+from src.settings import get_settings
+
 log = logging.getLogger(__name__)
 
 # ── константы────
@@ -249,14 +253,15 @@ def load_hf_mqm(processed_dir: Path, force: bool = False) -> pd.DataFrame:
 # ── main─────────
 
 def parse_args() -> argparse.Namespace:
+    s = get_settings()
     p = argparse.ArgumentParser(description="Загрузка и нормализация HF DA и HF MQM")
     p.add_argument(
-        "--data-dir", type=Path, default=Path("data"),
-        help="Корневая директория данных (default: data/)"
+        "--data-dir", type=Path, default=s.data_dir,
+        help="Корневая директория данных",
     )
     p.add_argument(
-        "--seed", type=int, default=RANDOM_SEED,
-        help=f"Random seed (default: {RANDOM_SEED})"
+        "--seed", type=int, default=s.random_seed,
+        help="Random seed",
     )
     p.add_argument(
         "--skip-da",  action="store_true", help="Пропустить загрузку HF DA"
@@ -272,33 +277,32 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    init_script_runtime()
     args = parse_args()
+    seed_everything(args.seed)
     processed_dir = args.data_dir / "processed"
 
-    log.info("=== prepare_data.py ===")
-    log.info("data_dir=%s  seed=%d", args.data_dir, args.seed)
+    log.info("prepare_data: data_dir=%s seed=%d", args.data_dir, args.seed)
 
     if not args.skip_da:
-        log.info("── Шаг 1: HF DA ──────────────────────────────")
         da_df = load_hf_da(processed_dir, seed=args.seed, force=args.force)
         log.info(
-            "HF DA готов: %d строк  |  train=%d  val=%d  test=%d",
+            "HF DA: %d rows (train=%d val=%d test=%d)",
             len(da_df),
             (da_df["split"] == "train").sum(),
             (da_df["split"] == "val").sum(),
             (da_df["split"] == "test").sum(),
         )
     else:
-        log.info("── Шаг 1: HF DA пропущен (--skip-da) ─────────")
+        log.info("HF DA skipped (--skip-da)")
 
     if not args.skip_mqm:
-        log.info("── Шаг 2: HF MQM ─────────────────────────────")
         mqm_df = load_hf_mqm(processed_dir, force=args.force)
-        log.info("HF MQM готов: %d строк", len(mqm_df))
+        log.info("HF MQM: %d rows", len(mqm_df))
     else:
-        log.info("── Шаг 2: HF MQM пропущен (--skip-mqm) ───────")
+        log.info("HF MQM skipped (--skip-mqm)")
 
-    log.info("=== Готово. Следующий шаг: scripts/build_wordlevel.py ===")
+    log.info("prepare_data: finished")
 
 
 if __name__ == "__main__":

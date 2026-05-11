@@ -25,16 +25,19 @@ seg_id в TSV везде -1 и бесполезен.
 
 import argparse
 import logging
+import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)s  %(message)s",
-    datefmt="%H:%M:%S",
-)
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from src.bootstrap import init_script_runtime
+from src.settings import get_settings
+
 log = logging.getLogger(__name__)
 
 RANDOM_SEED = 42
@@ -142,9 +145,11 @@ def print_stats(df: pd.DataFrame) -> None:
 
 
 def main() -> None:
+    init_script_runtime()
+    s = get_settings()
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data-dir", type=Path, default=Path("data"))
-    parser.add_argument("--seed", type=int, default=RANDOM_SEED)
+    parser.add_argument("--data-dir", type=Path, default=s.data_dir)
+    parser.add_argument("--seed", type=int, default=s.random_seed)
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
 
@@ -152,8 +157,6 @@ def main() -> None:
     if out_path.exists() and not args.force:
         log.info("Файл уже существует: %s - пропускаем", out_path)
         return
-
-    log.info("=== build_wordlevel.py ===")
 
     df = pd.concat(
         [load_domain(args.data_dir / "raw" / "wordlevel", d) for d in DOMAINS],
@@ -169,7 +172,6 @@ def main() -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     df.to_parquet(out_path, index=False)
     log.info("Сохранено: %s", out_path)
-    log.info("Следующий шаг: scripts/dedup_mqm.py")
 
 
 if __name__ == "__main__":

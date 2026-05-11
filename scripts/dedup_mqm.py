@@ -16,21 +16,26 @@ scripts/dedup_mqm.py
 
 import argparse
 import logging
+import sys
 from pathlib import Path
 
 import pandas as pd
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)s  %(message)s",
-    datefmt="%H:%M:%S",
-)
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from src.bootstrap import init_script_runtime
+from src.settings import get_settings
+
 log = logging.getLogger(__name__)
 
 
 def main() -> None:
+    init_script_runtime()
+    s = get_settings()
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data-dir", type=Path, default=Path("data"))
+    parser.add_argument("--data-dir", type=Path, default=s.data_dir)
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
 
@@ -40,8 +45,6 @@ def main() -> None:
     if out_path.exists() and not args.force:
         log.info("Файл уже существует: %s - пропускаем", out_path)
         return
-
-    log.info("=== dedup_mqm.py ===")
 
     da  = pd.read_parquet(processed_dir / "sentence_da.parquet")
     mqm = pd.read_parquet(processed_dir / "hf_mqm_raw.parquet")
@@ -68,7 +71,6 @@ def main() -> None:
 
     mqm_dedup.to_parquet(out_path, index=False)
     log.info("Сохранено: %s", out_path)
-    log.info("Следующий шаг: scripts/extract_features.py (запускать на Colab T4)")
 
 
 if __name__ == "__main__":

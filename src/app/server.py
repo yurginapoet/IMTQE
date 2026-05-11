@@ -12,13 +12,16 @@ src/app/server.py
 from __future__ import annotations
 
 import logging
+import os
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from src.app import api
 from src.app.models_state import ModelsState
 
 log = logging.getLogger(__name__)
@@ -29,19 +32,18 @@ log = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    import os
     os.environ.setdefault("HF_HUB_OFFLINE", "1")
     os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
     os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
     os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 
     state: ModelsState = app.state.models_state
-    log.info("=== MTQE: загрузка моделей (это займёт ~30–60 сек на CPU) ===")
+    log.info("MTQE: loading models (~30–60s on CPU)")
     t0 = time.monotonic()
     try:
         state.load()
         elapsed = time.monotonic() - t0
-        log.info("=== Модели загружены за %.1f сек. Сервер готов. ===", elapsed)
+        log.info("MTQE: models ready in %.1f s", elapsed)
     except Exception as exc:
         log.error("КРИТИЧЕСКАЯ ОШИБКА при загрузке моделей: %s", exc, exc_info=True)
         state.mark_error(str(exc))
@@ -49,7 +51,7 @@ async def lifespan(app: FastAPI):
 
     yield  # сервер работает
 
-    log.info("=== MTQE: завершение работы ===")
+    log.info("MTQE: shutdown")
 
 
 # ---------------------------------------------------------------------------
@@ -57,8 +59,6 @@ async def lifespan(app: FastAPI):
 # ---------------------------------------------------------------------------
 
 def create_app() -> FastAPI:
-    from src.app import api  # импорт здесь чтобы избежать circular imports
-
     application = FastAPI(
         title="MTQE — Machine Translation Quality Estimator",
         version="1.0.0",
@@ -72,8 +72,7 @@ def create_app() -> FastAPI:
     application.include_router(api.router)
 
     # Статические файлы
-    import pathlib
-    static_dir = pathlib.Path(__file__).parent / "static"
+    static_dir = Path(__file__).parent / "static"
     if static_dir.exists():
         application.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 

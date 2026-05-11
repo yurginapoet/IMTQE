@@ -28,14 +28,11 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+from src.bootstrap import init_script_runtime
 from src.features.extractor import FeatureExtractor
 from src.features.schema import FEATURE_NAMES_LIGHT, SENTENCE_FEATURE_NAMES
+from src.settings import get_settings
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)s  %(message)s",
-    datefmt="%H:%M:%S",
-)
 log = logging.getLogger(__name__)
 
 _LIGHT_INDEX = {name: idx for idx, name in enumerate(FEATURE_NAMES_LIGHT)}
@@ -350,9 +347,11 @@ def process_dataset(
 
 
 def main() -> None:
+    init_script_runtime()
+    s = get_settings()
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data-dir", type=Path, default=Path("data"))
-    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--data-dir", type=Path, default=s.data_dir)
+    parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--checkpoint-every", type=int, default=100)
     parser.add_argument("--checkpoint-dir", type=Path, default=Path("data/checkpoints/features"))
     parser.add_argument("--only", choices=["da", "wl", "mqm"], help="Обработать только один датасет")
@@ -372,12 +371,12 @@ def main() -> None:
         ),
     )
     args = parser.parse_args()
+    batch_size = args.batch_size if args.batch_size is not None else s.default_feature_batch_size()
 
     processed_dir = args.data_dir / "processed"
     sentence_input = resolve_sentence_input(processed_dir)
 
-    log.info("=== extract_features.py ===")
-    log.info("Sentence-level источник: %s", sentence_input.name)
+    log.info("extract_features: sentence-level input %s", sentence_input.name)
 
     extractor = FeatureExtractor()
     if args.append_light:
@@ -422,14 +421,14 @@ def main() -> None:
             src_col=src_col,
             mt_col=mt_col,
             extractor=extractor,
-            batch_size=args.batch_size,
+            batch_size=batch_size,
             force=args.force,
             checkpoint_dir=args.checkpoint_dir,
             checkpoint_every=args.checkpoint_every,
             append_light=args.append_light,
         )
 
-    log.info("=== Готово. Следующий шаг: scripts/train_sentence_model.py ===")
+    log.info("extract_features: finished")
 
 
 if __name__ == "__main__":

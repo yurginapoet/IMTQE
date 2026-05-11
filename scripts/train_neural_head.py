@@ -29,6 +29,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
+import xgboost as xgb
 import torch.nn as nn
 from scipy.stats import pearsonr, spearmanr
 from torch.utils.data import DataLoader, TensorDataset
@@ -37,15 +38,12 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+from src.bootstrap import init_script_runtime
 from src.features.schema import SENTENCE_FEATURE_NAMES
+from src.settings import get_settings
 from src.models.neural_head import FeatureAttentionHead
 from src.models.sentence_model import MQM_CATEGORY_RU
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)s  %(message)s",
-    datefmt="%H:%M:%S",
-)
 log = logging.getLogger(__name__)
 
 RANDOM_SEED = 42
@@ -111,8 +109,6 @@ def train(
     torch.manual_seed(RANDOM_SEED)
     np.random.seed(RANDOM_SEED)
 
-    # --- Загружаем XGBoost и считаем его предсказания ---
-    import xgboost as xgb
     xgb_model_path = models_dir / "xgboost_sentence.model"
     if not xgb_model_path.exists():
         raise FileNotFoundError(
@@ -257,9 +253,11 @@ def eval_only(
 
 
 def main() -> None:
+    init_script_runtime()
+    s = get_settings()
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data-dir",   type=Path, default=Path("data"))
-    parser.add_argument("--models-dir", type=Path, default=Path("models"))
+    parser.add_argument("--data-dir", type=Path, default=s.data_dir)
+    parser.add_argument("--models-dir", type=Path, default=s.models_dir)
     parser.add_argument("--epochs",     type=int,  default=120)
     parser.add_argument("--lr",         type=float, default=3e-4)
     parser.add_argument("--batch-size", type=int,  default=256)
@@ -268,8 +266,6 @@ def main() -> None:
     args = parser.parse_args()
 
     processed_dir = args.data_dir / "processed"
-    log.info("=== train_neural_head.py ===")
-
     df, feature_cols = load_data(processed_dir)
 
     if args.eval_only:
@@ -285,7 +281,7 @@ def main() -> None:
         batch_size=args.batch_size,
         patience=args.patience,
     )
-    log.info("=== Готово. Модель в models/neural_head.pt ===")
+    log.info("train_neural_head: saved %s", args.models_dir / "neural_head.pt")
 
 
 if __name__ == "__main__":

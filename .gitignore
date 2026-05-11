@@ -4,3 +4,4 @@ __pycache__/
 architechture_req.md
 data/processed/
 models/
+logs/

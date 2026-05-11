@@ -1,28 +1,4 @@
-"""
-scripts/train_sentence_model.py
-
-Шаг 5 из пайплайна MTQE.
-Обучает sentence-level модель на признаках из sentence_da_features.parquet.
-Целевая переменная: score_norm (DA score нормализованный в [0,1]).
-
-Поддерживаемые модели (флаг --model):
-  xgboost  — XGBRegressor, eval_metric=Pearson, точечные предсказания
-  ngboost  — NGBRegressor + Beta distribution, предсказывает (α, β), CI₉₅
-
-Выходные файлы:
-  models/xgboost_sentence.pkl   или   models/ngboost_sentence.pkl
-  models/shap_explainer.pkl
-
-Метрики:
-  Pearson r  — на DA test (5%)
-  Spearman ρ — на HF MQM dedup (внешний тест, только ранговая корреляция)
-
-Запуск:
-  python scripts/train_sentence_model.py                        # xgboost по умолчанию
-  python scripts/train_sentence_model.py --model ngboost        # ngboost + Beta
-  python scripts/train_sentence_model.py --eval-only            # только внешний тест
-  python scripts/train_sentence_model.py --eval-only --model ngboost
-"""
+"""Обучение sentence-level XGBoost на sentence_da_features.parquet → xgboost_sentence.model, shap_explainer.pkl."""
 
 import argparse
 import logging
@@ -41,16 +17,15 @@ from xgboost import DMatrix
 from xgboost import XGBRegressor
 from xgboost.callback import TrainingCallback as _XGBTrainingCallback
 
-# from ngboost import NGBRegressor
-# from ngboost.distns import Beta
-
 from scipy.optimize import minimize_scalar
-from scipy.stats import pearsonr
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+from src.bootstrap import init_script_runtime
+from src.determinism import seed_everything
+from src.settings import get_settings
 from src.features.interactions import add_interaction_columns_to_dataframe
 from src.features.schema import (
     FEATURE_NAMES,
@@ -58,16 +33,9 @@ from src.features.schema import (
     SENTENCE_FEATURE_NAMES,
 )
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)s  %(message)s",
-    datefmt="%H:%M:%S",
-)
 log = logging.getLogger(__name__)
 
 RANDOM_SEED = 42
-# NGBoost: Beta требует строго (0, 1), не включая границы
-BETA_EPS = 1e-4
 DEFAULT_SYNTHETIC_WEIGHT = 0.10
 
 
@@ -92,20 +60,13 @@ def add_interaction_features(df: pd.DataFrame, feature_cols: list[str]) -> tuple
 def build_shap_explainer(
     model: Any,
     df: pd.DataFrame,
-    feature_cols: list[str],   # ← теперь это уже расширенный список с interaction
+    feature_cols: list[str],
     models_dir: Path,
-    model_type: str,
 ) -> None:
-    log.info("Строим SHAP explainer (model_type=%s)...", model_type)
+    log.info("Строим SHAP TreeExplainer для XGBoost")
     log.info("SHAP будет использовать %d признаков", len(feature_cols))
 
-    if model_type == "ngboost":
-        base_learner = model.learners_[0]
-        explainer = shap.TreeExplainer(base_learner)
-    else:
-        # XGBoost: explainer строится на модели, X_sample должен
-        # иметь ровно те же колонки что видела модель при обучении
-        explainer = shap.TreeExplainer(model)
+    explainer = shap.TreeExplainer(model)
 
     # ИСПРАВЛЕНИЕ: берём X_sample из df с interaction признаками
     # feature_cols уже содержит расширенный список — просто фильтруем по наличию
@@ -294,19 +255,15 @@ def train_xgboost(
     models_dir: Path,
     synthetic_weight: float = 0.12,
     semantic_feature_weight: float = 1.0,
+    seed: int = RANDOM_SEED,
 ) -> Any:
-    
     train_df, val_df, test_df = _split_frames(df)
 
-        # Удаляем половину synthetic train-примеров
     if "is_synthetic" in train_df.columns:
         synthetic_df = train_df[train_df["is_synthetic"] == True]
         real_df = train_df[train_df["is_synthetic"] != True]
 
-        synthetic_df = synthetic_df.sample(
-            frac=0.20,
-            random_state=RANDOM_SEED,
-        )
+        synthetic_df = synthetic_df.sample(frac=0.20, random_state=seed)
 
         train_df = pd.concat([real_df, synthetic_df], ignore_index=True)
 
@@ -316,7 +273,7 @@ def train_xgboost(
             len(real_df),
             len(synthetic_df),
         )
-    
+
     X_train = train_df[feature_cols].values
     y_train = train_df["score_norm"].values
     X_val = val_df[feature_cols].values
@@ -359,7 +316,7 @@ def train_xgboost(
         "reg_alpha":        0.05,
         "gamma":            0.05,
         "tree_method":      "hist",
-        "seed":             RANDOM_SEED,
+        "seed":             seed,
     }
 
     pearson_cb = _PearsonCallback(X_val, y_val, patience=120)
@@ -410,91 +367,11 @@ def train_xgboost(
     model.load_model(str(model_path))
     return model, feature_cols
 
-# ---------------------------------------------------------------------------
-# NGBoost
-# ---------------------------------------------------------------------------
-
-# def train_ngboost(
-#     df: pd.DataFrame,
-#     feature_cols: list[str],
-#     models_dir: Path,
-#     synthetic_weight: float,
-# ) -> Any:
-#     train_df, val_df, test_df = _split_frames(df)
-#     X_train = train_df[feature_cols].values
-#     y_train = train_df["score_norm"].values
-#     X_val = val_df[feature_cols].values
-#     y_val = val_df["score_norm"].values
-#     X_test = test_df[feature_cols].values
-#     y_test = test_df["score_norm"].values
-
-#     # Beta требует строго (0, 1): клиппинг с запасом
-#     y_train = y_train.clip(BETA_EPS, 1 - BETA_EPS)
-#     y_val   = y_val.clip(BETA_EPS, 1 - BETA_EPS)
-#     y_test  = y_test.clip(BETA_EPS, 1 - BETA_EPS)
-
-#     # Asymmetric sample weights: плохие переводы важнее (из архитектуры)
-#     TAU, W_HIGH, W_LOW = 0.5, 3.0, 1.0
-#     sample_weight = _build_train_sample_weights(
-#         train_df,
-#         synthetic_weight=synthetic_weight,
-#         low_score_tau=TAU,
-#         low_score_weight=W_HIGH,
-#     )
-#     log.info(
-#         "Asymmetric weights: tau=%.2f  w_high=%.1f  w_low=%.1f  "
-#         "(плохих примеров: %d / %d, итоговый mean_weight=%.3f)",
-#         TAU, W_HIGH, W_LOW,
-#         (y_train < TAU).sum(), len(y_train),
-#         float(sample_weight.mean()),
-#     )
-
-#     model = NGBRegressor(
-#         Dist=Beta,
-#         n_estimators=800,
-#         learning_rate=0.05,
-#         random_state=RANDOM_SEED,
-#         verbose=100,
-#         verbose_eval=100,
-#     )
-
-#     log.info("Обучение NGBoost (Dist=Beta, asymmetric weights)...")
-#     model.fit(
-#         X_train, y_train,
-#         X_val=X_val, Y_val=y_val,
-#         early_stopping_rounds=50,
-#         sample_weight=sample_weight,
-#     )
-
-#     # Предсказание: ожидание Beta-распределения E[q] = α/(α+β)
-#     dist_test = model.pred_dist(X_test)
-#     preds_test = dist_test.mean()
-#     _log_metrics(y_test, preds_test, "DA test [NGBoost]")
-
-#     # Дополнительно: показываем неопределённость на первых 5 примерах
-#     alpha = dist_test.params["alpha"][:5]
-#     beta  = dist_test.params["beta"][:5]
-#     var   = (alpha * beta) / ((alpha + beta) ** 2 * (alpha + beta + 1))
-#     log.info("Uncertainty (Var первых 5 примеров): %s", np.round(var, 4))
-
-#     models_dir.mkdir(parents=True, exist_ok=True)
-#     model_path = models_dir / "ngboost_sentence.pkl"
-#     with open(model_path, "wb") as f:
-#         pickle.dump(model, f)
-#     log.info("Модель сохранена: %s", model_path)
-
-#     return model
-
-
-# ---------------------------------------------------------------------------
-# Внешний тест на MQM
-# ---------------------------------------------------------------------------
 
 def external_test(
     model: Any,
     processed_dir: Path,
     feature_cols: list[str],
-    model_type: str,
 ) -> None:
     mqm_path = processed_dir / "hf_mqm_features.parquet"
     if not mqm_path.exists():
@@ -519,11 +396,7 @@ def external_test(
         return
 
     X_mqm = mqm[feature_cols].values
-
-    if model_type == "ngboost":
-        preds = model.pred_dist(X_mqm).mean()
-    else:
-        preds = model.predict(X_mqm)
+    preds = model.predict(X_mqm)
 
     mqm_score_raw = mqm["score"].values
 
@@ -564,10 +437,7 @@ def external_test(
     # MQM: больше = лучше (0=идеально, отрицательное=плохо)
     # DA preds: больше = лучше → направление совпадает, инверсия не нужна
     rho, pvalue = spearmanr(mqm_score, preds)
-    log.info(
-        "MQM внешний тест [%s] — Spearman ρ=%.4f  p=%.4f",
-        model_type, rho, pvalue,
-    )
+    log.info("MQM внешний тест — Spearman ρ=%.4f  p=%.4f", rho, pvalue)
 
     # Дополнительно: тест по квантилям (топ-20% vs bottom-20%)
     # Помогает понять различает ли модель явно плохие и хорошие переводы
@@ -586,42 +456,25 @@ def external_test(
 # main
 # ---------------------------------------------------------------------------
 
-def _model_pkl_name(model_type: str) -> str:
-    return f"{model_type}_sentence.pkl"
-
-
-def _load_model_for_eval(model_type: str, models_dir: Path) -> Any:
-    if model_type == "xgboost":
-        model_path = models_dir / "xgboost_sentence.model"
-        if not model_path.exists():
-            raise FileNotFoundError(
-                f"Не найден файл модели: {model_path}\n"
-                "Сначала обучи: python scripts/train_sentence_model.py --model xgboost"
-            )
-        model = XGBRegressor()
-        model.load_model(str(model_path))
-        return model
-
-    model_path = models_dir / _model_pkl_name(model_type)
+def _load_model_for_eval(models_dir: Path) -> Any:
+    model_path = models_dir / "xgboost_sentence.model"
     if not model_path.exists():
         raise FileNotFoundError(
             f"Не найден файл модели: {model_path}\n"
-            f"Сначала обучи: python scripts/train_sentence_model.py --model {model_type}"
+            "Сначала обучи: poetry run imtqe train-sentence"
         )
-    with open(model_path, "rb") as f:
-        return pickle.load(f)
+    model = XGBRegressor()
+    model.load_model(str(model_path))
+    return model
 
 
 def main() -> None:
+    init_script_runtime()
+    s = get_settings()
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data-dir",   type=Path, default=Path("data"))
-    parser.add_argument("--models-dir", type=Path, default=Path("models"))
-    parser.add_argument(
-        "--model",
-        choices=["xgboost", "ngboost"],
-        default="xgboost",
-        help="Какую модель обучать: xgboost (default) или ngboost+Beta",
-    )
+    parser.add_argument("--data-dir", type=Path, default=s.data_dir)
+    parser.add_argument("--models-dir", type=Path, default=s.models_dir)
+    parser.add_argument("--seed", type=int, default=s.random_seed)
     parser.add_argument(
         "--eval-only", action="store_true",
         help="Только внешний тест на MQM, без переобучения",
@@ -646,41 +499,32 @@ def main() -> None:
         ),
     )
     args = parser.parse_args()
+    seed_everything(args.seed)
 
     processed_dir = args.data_dir / "processed"
-    log.info("=== train_sentence_model.py  [model=%s] ===", args.model)
-
     if args.eval_only:
-        model = _load_model_for_eval(args.model, args.models_dir)
+        model = _load_model_for_eval(args.models_dir)
         df, feature_cols = load_data(processed_dir)
         df, feature_cols = add_interaction_features(df, feature_cols)
-        external_test(model, processed_dir, feature_cols, args.model)
+        external_test(model, processed_dir, feature_cols)
         return
 
     df, feature_cols = load_data(processed_dir)
     df, feature_cols = add_interaction_features(df, feature_cols)
     log.info("Итого признаков после interaction: %d", len(feature_cols))
 
-    if args.model == "xgboost":
-        model, feature_cols = train_xgboost(
-            df,
-            feature_cols,
-            args.models_dir,
-            synthetic_weight=args.synthetic_weight,
-            semantic_feature_weight=args.semantic_feature_weight,
-        )
-    # else:
-    #     model = train_ngboost(
-    #         df,
-    #         feature_cols,
-    #         args.models_dir,
-    #         synthetic_weight=args.synthetic_weight,
-    #     )
+    model, feature_cols = train_xgboost(
+        df,
+        feature_cols,
+        args.models_dir,
+        synthetic_weight=args.synthetic_weight,
+        semantic_feature_weight=args.semantic_feature_weight,
+        seed=args.seed,
+    )
 
-    build_shap_explainer(model, df, feature_cols, args.models_dir, args.model)
-    external_test(model, processed_dir, feature_cols, args.model)
-
-    log.info("=== Готово [%s]. Следующий шаг: scripts/train_span_model.py ===", args.model)
+    build_shap_explainer(model, df, feature_cols, args.models_dir)
+    external_test(model, processed_dir, feature_cols)
+    log.info("train_sentence_model: finished")
 
 
 if __name__ == "__main__":

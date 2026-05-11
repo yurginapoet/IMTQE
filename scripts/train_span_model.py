@@ -31,6 +31,7 @@ OK / BAD-minor / BAD-major.
 import argparse
 import logging
 import os
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -39,6 +40,13 @@ import pandas as pd
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from src.bootstrap import init_script_runtime
+from src.settings import get_settings
 from transformers import (
     AutoModelForTokenClassification,
     AutoTokenizer,
@@ -47,11 +55,6 @@ from transformers import (
 )
 from sklearn.metrics import f1_score, classification_report
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)s  %(message)s",
-    datefmt="%H:%M:%S",
-)
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -546,9 +549,11 @@ def eval_only(
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    init_script_runtime()
+    s = get_settings()
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data-dir",   type=Path, default=Path("data"))
-    parser.add_argument("--models-dir", type=Path, default=Path("models"))
+    parser.add_argument("--data-dir", type=Path, default=s.data_dir)
+    parser.add_argument("--models-dir", type=Path, default=s.models_dir)
     parser.add_argument("--epochs",     type=int,  default=5)
     parser.add_argument("--batch-size", type=int,  default=16)
     parser.add_argument("--lr",         type=float, default=2e-5)
@@ -586,8 +591,6 @@ def main() -> None:
         cnt = all_labels.count(label)
         log.info("  %-12s %6d слов  (%.1f%%)", label, cnt, 100 * cnt / total)
 
-    log.info("=== train_span_model.py ===")
-
     if args.eval_only:
         eval_only(df, args.models_dir, args.batch_size * 2, device)
     else:
@@ -597,7 +600,7 @@ def main() -> None:
             lr=args.lr, patience=args.patience, device=device,
         )
 
-    log.info("=== Готово. Следующий шаг: notebooks/07_evaluation.ipynb ===")
+    log.info("train_span_model: finished")
 
 
 if __name__ == "__main__":

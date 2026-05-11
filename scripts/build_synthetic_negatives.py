@@ -16,16 +16,19 @@ import argparse
 import hashlib
 import logging
 import re
+import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)s  %(message)s",
-    datefmt="%H:%M:%S",
-)
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from src.bootstrap import init_script_runtime
+from src.settings import get_settings
+
 log = logging.getLogger(__name__)
 
 RANDOM_SEED = 42
@@ -189,9 +192,11 @@ def build_synthetic_rows(
 
 
 def main() -> None:
+    init_script_runtime()
+    s = get_settings()
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data-dir", type=Path, default=Path("data"))
-    parser.add_argument("--seed", type=int, default=RANDOM_SEED)
+    parser.add_argument("--data-dir", type=Path, default=s.data_dir)
+    parser.add_argument("--seed", type=int, default=s.random_seed)
     parser.add_argument("--max-rows", type=int, default=None)
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
@@ -206,7 +211,6 @@ def main() -> None:
     if not in_path.exists():
         raise FileNotFoundError(f"Не найден входной файл: {in_path}")
 
-    log.info("=== build_synthetic_negatives.py ===")
     df = pd.read_parquet(in_path)
     if "is_synthetic" not in df.columns:
         df["is_synthetic"] = False

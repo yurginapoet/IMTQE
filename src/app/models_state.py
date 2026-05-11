@@ -13,6 +13,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional
 
+from src.predict import Predictor
+
 log = logging.getLogger(__name__)
 
 
@@ -47,9 +49,6 @@ class ModelsState:
         device: str = "cpu",
     ) -> None:
         self._status = LoadStatus.LOADING
-        # Импорт здесь — тяжёлые зависимости (torch, transformers, sentence_transformers)
-        # загружаются только один раз при вызове load()
-        from src.predict import Predictor
         self._predictor = Predictor(
             models_dir=models_dir,
             mqm_weights_path=mqm_weights_path,

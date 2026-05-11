@@ -4,17 +4,14 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import joblib
 import numpy as np
 import torch
+from sentence_transformers import SentenceTransformer
 
 from src.config import Config
 from src.features.schema import SEMANTIC_FEATURE_NAMES
-
-if TYPE_CHECKING:
-    from sentence_transformers import SentenceTransformer
 
 SEMANTIC_VECTOR_SIZE = len(SEMANTIC_FEATURE_NAMES)
 log = logging.getLogger(__name__)
@@ -29,9 +26,7 @@ def resolve_device(device: str | None = None) -> str:
 def load_encoder(
     model_name: str = Config.SEMANTIC_ENCODER_NAME,
     device: str | None = None,
-) -> "SentenceTransformer":
-    from sentence_transformers import SentenceTransformer
-
+) -> SentenceTransformer:
     resolved_device = resolve_device(device)
     log.info("Загрузка semantic encoder на device=%s", resolved_device)
 
@@ -54,7 +49,9 @@ def load_encoder(
     return model
 
 
-def load_pca(path: str | Path = Config.SEMANTIC_PCA_PATH):
+def load_pca(path: str | Path | None = None):
+    if path is None:
+        path = Config.semantic_pca_path()
     pca = joblib.load(path)
     n_components = getattr(pca, "n_components_", getattr(pca, "n_components", None))
     if int(n_components) != SEMANTIC_VECTOR_SIZE:
@@ -66,7 +63,7 @@ def load_pca(path: str | Path = Config.SEMANTIC_PCA_PATH):
 
 def build_difference_vectors(
     pairs: list[tuple[str, str]],
-    encoder: "SentenceTransformer",
+    encoder: SentenceTransformer,
     batch_size: int = 64,
     show_progress_bar: bool = False,
 ) -> np.ndarray:
@@ -107,7 +104,7 @@ def vector_to_feature_dict(vector: np.ndarray) -> dict[str, float]:
 def extract(
     src: str,
     mt: str,
-    encoder: "SentenceTransformer",
+    encoder: SentenceTransformer,
     pca,
 ) -> dict[str, float]:
     projected = extract_batch([(src, mt)], encoder, pca, batch_size=1)
@@ -116,7 +113,7 @@ def extract(
 
 def extract_batch(
     pairs: list[tuple[str, str]],
-    encoder: "SentenceTransformer",
+    encoder: SentenceTransformer,
     pca,
     batch_size: int = 64,
 ) -> list[dict[str, float]]:

@@ -1,10 +1,7 @@
 """
-Инференс-обёртка над обученной sentence-level моделью (XGBoost или NGBoost).
+Инференс sentence-level модели (XGBoost) и SHAP explainer.
 
-Поддерживает:
-  - sentence-вектор с semantic PCA (база 86 + interaction, см. schema.SENTENCE_FEATURE_NAMES)
-  - классику без PCA (22 + interaction)
-  - старые 22-мерные / 16 light артефакты для обратной совместимости
+Поддерживает sentence-вектор с semantic PCA, классику без PCA, старые размерности.
 """
 
 from __future__ import annotations
@@ -16,6 +13,7 @@ from pathlib import Path
 from typing import Dict, Optional, Union
 
 import numpy as np
+import xgboost as xgb
 from scipy.stats import beta as scipy_beta
 
 from src.features.schema import (
@@ -26,11 +24,6 @@ from src.features.schema import (
     SENTENCE_FEATURE_NAMES,
     SENTENCE_FEATURE_NAMES_CLASSIC,
 )
-
-try:
-    import xgboost as xgb
-except ImportError:
-    xgb = None
 
 log = logging.getLogger(__name__)
 
@@ -103,8 +96,6 @@ class SentencePrediction:
 
 
 class SentenceModel:
-    """Загружает sentence-level модель и SHAP explainer."""
-
     def __init__(self, model_path: Union[str, Path], explainer_path: Union[str, Path]):
         model_path = Path(model_path)
         explainer_path = Path(explainer_path)
@@ -120,8 +111,7 @@ class SentenceModel:
                 loaded_expl = pickle.load(f)
         except ModuleNotFoundError as exc:
             log.warning(
-                "Не удалось загрузить SHAP explainer (%s). "
-                "Продолжаем без SHAP: значения будут нулевыми.",
+                "Не удалось загрузить SHAP explainer (%s). Продолжаем без SHAP.",
                 exc,
             )
             loaded_expl = None
@@ -134,18 +124,17 @@ class SentenceModel:
             self._explainer = loaded_expl
 
         if model_path.suffix == ".model":
-            if xgb is None:
-                raise ImportError("xgboost не установлен, но требуется для .model файла")
             self._model = xgb.XGBRegressor()
             self._model.load_model(str(model_path))
-            self._model_type = "xgboost"
             log.info("Загружена XGBoost модель из %s", model_path)
         else:
             with open(model_path, "rb") as f:
                 self._model = pickle.load(f)
-            cls_name = type(self._model).__name__
-            self._model_type = "ngboost" if "NGBRegressor" in cls_name else "xgboost"
-            log.info("Загружена модель типа %s из %s", self._model_type, model_path)
+            if not isinstance(self._model, xgb.XGBRegressor):
+                raise TypeError(
+                    "Поддерживается только XGBoost (файл .model или pickle XGBRegressor)."
+                )
+            log.info("Загружена XGBoost модель (pickle) из %s", model_path)
 
         self._expected_feature_count = self._infer_feature_count()
         if (
@@ -155,10 +144,7 @@ class SentenceModel:
             self._feature_names = list(self._explainer_feature_names)
         else:
             self._feature_names = _infer_feature_names(self._expected_feature_count)
-        log.info(
-            "SentenceModel ожидает %d признаков",
-            self._expected_feature_count,
-        )
+        log.info("SentenceModel ожидает %d признаков", self._expected_feature_count)
 
     @property
     def feature_names(self) -> list[str]:
@@ -170,22 +156,17 @@ class SentenceModel:
 
     def predict(self, features: np.ndarray) -> SentencePrediction:
         X = self._prepare_features(features)
-        if self._model_type == "ngboost":
-            return self._predict_ngboost(X)[0]
         return self._predict_xgboost(X)[0]
 
     def predict_batch(self, features: np.ndarray) -> list[SentencePrediction]:
         X = self._prepare_features(features)
-        if self._model_type == "ngboost":
-            return self._predict_ngboost(X)
         return self._predict_xgboost(X)
 
     def _infer_feature_count(self) -> int:
-        if self._model_type == "xgboost":
-            try:
-                return int(self._model.get_booster().num_features())
-            except Exception:
-                pass
+        try:
+            return int(self._model.get_booster().num_features())
+        except Exception:
+            pass
 
         for attr_name in ("n_features_in_", "n_features_", "n_features"):
             value = getattr(self._model, attr_name, None)
@@ -211,43 +192,15 @@ class SentenceModel:
             return X
         if X.shape[1] > self._expected_feature_count:
             log.warning(
-                "Получено %d признаков, но модель ожидает %d. "
-                "Используем первые %d для совместимости.",
+                "Получено %d признаков, модель ожидает %d — берём первые %d.",
                 X.shape[1],
                 self._expected_feature_count,
                 self._expected_feature_count,
             )
             return X[:, : self._expected_feature_count]
         raise ValueError(
-            f"Недостаточно признаков: модель ожидает {self._expected_feature_count}, "
-            f"получено {X.shape[1]}"
+            f"Недостаточно признаков: нужно {self._expected_feature_count}, получено {X.shape[1]}"
         )
-
-    def _predict_ngboost(self, X: np.ndarray) -> list[SentencePrediction]:
-        dist = self._model.pred_dist(X)
-        alphas = dist.params["alpha"]
-        betas = dist.params["beta"]
-        shap_vals = self._shap_values(X)
-
-        results = []
-        for idx in range(len(alphas)):
-            alpha = float(alphas[idx])
-            beta_param = float(betas[idx])
-            score, uncertainty, ci_low, ci_high = _beta_stats(alpha, beta_param)
-            sv = shap_vals[idx] if shap_vals.ndim == 2 else shap_vals
-            results.append(
-                SentencePrediction(
-                    score=score,
-                    uncertainty=uncertainty,
-                    ci_low=ci_low,
-                    ci_high=ci_high,
-                    alpha=alpha,
-                    beta_param=beta_param,
-                    shap_values=sv,
-                    explanation=_aggregate_shap(sv, self._feature_names),
-                )
-            )
-        return results
 
     def _predict_xgboost(self, X: np.ndarray) -> list[SentencePrediction]:
         scores = np.clip(self._model.predict(X), 0.0, 1.0)

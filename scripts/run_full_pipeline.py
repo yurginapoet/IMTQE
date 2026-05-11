@@ -1,8 +1,4 @@
-"""
-scripts/run_full_pipeline.py
-
-Оркестратор полного пайплайна для Colab/локального запуска.
-"""
+"""Оркестратор полного пайплайна (локально или Colab: IMTQE_COLAB=1)."""
 
 from __future__ import annotations
 
@@ -11,20 +7,28 @@ import subprocess
 import sys
 from pathlib import Path
 
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from src.bootstrap import init_script_runtime
+from src.settings import get_settings
+
 
 def run_step(name: str, command: list[str]) -> None:
-    print(f"\n=== {name} ===")
+    print(name)
     print(" ".join(command))
     subprocess.run(command, check=True)
 
 
 def main() -> None:
+    init_script_runtime()
+    s = get_settings()
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data-dir", type=Path, default=Path("data"))
-    parser.add_argument("--models-dir", type=Path, default=Path("models"))
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--batch-size", type=int, default=64)
-    parser.add_argument("--sentence-model", choices=["xgboost", "ngboost"], default="xgboost")
+    parser.add_argument("--data-dir", type=Path, default=s.data_dir)
+    parser.add_argument("--models-dir", type=Path, default=s.models_dir)
+    parser.add_argument("--seed", type=int, default=s.random_seed)
+    parser.add_argument("--batch-size", type=int, default=s.default_feature_batch_size())
     parser.add_argument("--skip-span", action="store_true")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--max-synth-rows", type=int, default=None)
@@ -98,7 +102,7 @@ def main() -> None:
                 py, "scripts/train_sentence_model.py",
                 "--data-dir", str(args.data_dir),
                 "--models-dir", str(args.models_dir),
-                "--model", args.sentence_model,
+                "--seed", str(args.seed),
             ],
         ),
     ]
@@ -118,7 +122,7 @@ def main() -> None:
     for name, command in steps:
         run_step(name, command)
 
-    print("\nPipeline completed successfully.")
+    print("pipeline: completed")
 
 
 if __name__ == "__main__":

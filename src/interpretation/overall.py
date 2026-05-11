@@ -2,7 +2,7 @@
 src/interpretation/overall.py
 
 Сборка финального результата для одного предложения:
-  sentence score (NGBoost/XGBoost) + CI + SHAP explanation
+  sentence score (XGBoost) + CI + SHAP explanation
   + BAD-спаны с типами MQM (XLM-R + rules.py)
   + MQM-style агрегированный score
 
@@ -41,7 +41,7 @@ class OverallSentenceResult:
     Финальный результат для одного предложения (sentence + word level).
 
     Атрибуты:
-        sentence_score  оценка качества из NGBoost/XGBoost ∈ [0,1]
+        sentence_score  оценка качества из XGBoost ∈ [0,1]
         uncertainty     Var[Beta] или аппроксимация для XGBoost
         ci_low          нижняя граница CI₉₅
         ci_high         верхняя граница CI₉₅

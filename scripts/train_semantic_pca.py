@@ -31,13 +31,10 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+from src.bootstrap import init_script_runtime
 from src.features import neural
+from src.settings import get_settings
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)s  %(message)s",
-    datefmt="%H:%M:%S",
-)
 log = logging.getLogger(__name__)
 
 RANDOM_SEED = 42
@@ -183,15 +180,17 @@ def save_checkpoint_atomic(path: Path, payload: dict) -> None:
 
 
 def main() -> None:
+    init_script_runtime()
+    s = get_settings()
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data-dir", type=Path, default=Path("data"))
-    parser.add_argument("--models-dir", type=Path, default=Path("models"))
+    parser.add_argument("--data-dir", type=Path, default=s.data_dir)
+    parser.add_argument("--models-dir", type=Path, default=s.models_dir)
     parser.add_argument("--n-components", type=int, default=neural.SEMANTIC_VECTOR_SIZE)
     parser.add_argument("--batch-size", type=int, default=DEFAULT_EMBED_BATCH_SIZE)
     parser.add_argument("--chunk-size", type=int, default=DEFAULT_CHUNK_SIZE)
     parser.add_argument("--checkpoint-every", type=int, default=5)
     parser.add_argument("--device", type=str, default=None, help='Например "cuda" или "cpu"')
-    parser.add_argument("--seed", type=int, default=RANDOM_SEED)
+    parser.add_argument("--seed", type=int, default=s.random_seed)
     parser.add_argument("--max-rows", type=int, default=None)
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
@@ -212,8 +211,7 @@ def main() -> None:
     input_path = resolve_input_path(processed_dir)
     device = neural.resolve_device(args.device)
 
-    log.info("=== train_semantic_pca.py ===")
-    log.info("Источник пар: %s", input_path)
+    log.info("train_semantic_pca: input %s", input_path)
     log.info("Device для MiniLM: %s", device)
     log.info(
         "Параметры: n_components=%d  embed_batch_size=%d  chunk_size=%d",

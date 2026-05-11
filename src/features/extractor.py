@@ -15,6 +15,7 @@ from pathlib import Path
 import numpy as np
 import spacy
 import torch
+from sentence_transformers import SentenceTransformer
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from src.config import Config
@@ -38,7 +39,7 @@ class FeatureExtractor:
         self.nlp_en = spacy.load("en_core_web_sm", disable=["tagger", "parser", "lemmatizer"])
 
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        self.semantic_pca_path = Path(semantic_pca_path or Config.SEMANTIC_PCA_PATH)
+        self.semantic_pca_path = Path(semantic_pca_path or Config.semantic_pca_path())
 
         self.labse_model = None
         self.gpt_tokenizer = None
@@ -48,8 +49,6 @@ class FeatureExtractor:
 
     def load_heavy_models(self, require_neural: bool = False) -> None:
         """Загружает LaBSE, ruGPT-3 и при наличии MiniLM + PCA."""
-        from sentence_transformers import SentenceTransformer
-
         self._log.info("Используем device=%s для тяжёлых моделей", self.device)
         local_files_only = Config.hf_local_files_only()
 

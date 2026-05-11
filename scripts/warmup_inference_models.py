@@ -23,17 +23,13 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+from src.bootstrap import init_script_runtime
 from src.config import Config
 from src.features.extractor import FeatureExtractor
 from src.models.sentence_model import SentenceModel
 from src.models.span_model import SpanModel
 from src.predict import Predictor
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)s  %(message)s",
-    datefmt="%H:%M:%S",
-)
 log = logging.getLogger(__name__)
 
 
@@ -70,14 +66,15 @@ def configure_env(download: bool) -> None:
 
 
 def main() -> None:
+    init_script_runtime()
     args = parse_args()
     configure_env(download=args.download)
 
     t0 = time.time()
     log.info("Проверка sentence-level модели...")
     sentence_model = SentenceModel(
-        Config.MODELS_DIR / "xgboost_sentence.model",
-        Config.MODELS_DIR / "shap_explainer.pkl",
+        Config.models_dir() / "xgboost_sentence.model",
+        Config.models_dir() / "shap_explainer.pkl",
     )
     log.info(
         "SentenceModel OK: expected_feature_count=%d",
@@ -94,7 +91,7 @@ def main() -> None:
     )
 
     log.info("Проверка span-модели...")
-    span_model = SpanModel(Config.MODELS_DIR / "xlm_roberta_span", device=args.device)
+    span_model = SpanModel(Config.models_dir() / "xlm_roberta_span", device=args.device)
     log.info("SpanModel OK: tokenizer=%s", type(span_model.tokenizer).__name__)
 
     if args.predict:

@@ -247,3 +247,7 @@ Unlike black-box approaches, it explicitly shows:
 - where errors occur
 - what type of errors they are
 - how they affect the final score
+
+
+Run:   
+`poetry run uvicorn src.app.server:app --host 0.0.0.0 --port 8000 --reload`

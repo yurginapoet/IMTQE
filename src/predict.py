@@ -1,29 +1,4 @@
-"""
-src/predict.py
-
-Единая точка входа для инференса MTQE (sentence + word-level).
-
-Загружает все модели один раз при создании Predictor:
-  - FeatureExtractor   (spaCy + LaBSE + ruGPT-3)
-  - SentenceModel      (XGBoost/NGBoost) + SHAP explainer
-  - SpanModel          (XLM-R token classification)
-  - OverallSentenceEvaluator (rules.py + MQM-aggregation)
-
-Публичный API:
-  predictor.predict_sentence(src, mt) → SentenceUIResult
-  predictor.predict_batch([(src, mt), ...]) → list[SentenceUIResult]
-
-ИСПРАВЛЕНИЯ:
-  1. _render_highlighted_mt — индексация end_idx теперь безопасна
-     для всех крайних случаев (end_idx >= len(mt_words)).
-  2. В SentenceErrorItem убрано дублирование error_type + русского описания
-     в одну строку через дефис — теперь хранятся раздельно для гибкости UI.
-  3. predict_batch — слова берутся через FeatureExtractor токенизацию
-     (согласовано с span_model), а не через .split() который может
-     расходиться с spaCy-токенизацией span-модели.
-  4. ДОБАВЛЕНО: поле debug в SentenceUIResult, содержащее features,
-     word_logprobs и shap_values для детального отображения на фронтенде.
-"""
+"""Инференс MTQE: признаки, sentence XGBoost + SHAP, span-модель, агрегация MQM."""
 
 from __future__ import annotations
 
@@ -68,7 +43,7 @@ class SentenceUIResult:
     """Финальный результат одного предложения для UI и API."""
     src:                  str
     mt:                   str
-    score:                float          # NGBoost/XGBoost score ∈ [0,1]
+    score:                float
     ci_low:               float
     ci_high:              float
     uncertainty:          float
@@ -87,20 +62,6 @@ class SentenceUIResult:
 # ---------------------------------------------------------------------------
 
 class Predictor:
-    """
-    Единая точка входа для инференса MTQE (sentence + word-level).
-
-    Загружает модели один раз — держать один экземпляр на процесс.
-
-    Параметры:
-        models_dir           корневая директория моделей (по умолчанию "models/")
-        sentence_model_path  путь к .model (XGBoost) или .pkl (NGBoost)
-        shap_explainer_path  путь к shap_explainer.pkl
-        span_model_dir       путь к директории xlm_roberta_span (HF формат)
-        mqm_weights_path     путь к weights_mqm.npy (None → единичные веса)
-        device               "cpu" или "cuda" для SpanModel
-    """
-
     def __init__(
         self,
         models_dir: str | Path = "models",
@@ -113,10 +74,8 @@ class Predictor:
         models_dir = Path(models_dir)
         self._models_dir = models_dir
 
-        # Автовыбор модели предложения: XGBoost приоритетнее NGBoost
         if sentence_model_path is None:
-            candidate = models_dir / "xgboost_sentence.model"
-            sentence_model_path = candidate if candidate.exists() else models_dir / "ngboost_sentence.pkl"
+            sentence_model_path = models_dir / "xgboost_sentence.model"
 
         if shap_explainer_path is None:
             shap_explainer_path = models_dir / "shap_explainer.pkl"
@@ -148,19 +107,16 @@ class Predictor:
 
         self._neural_head: FeatureAttentionHead | None = None
         self._neural_feature_names: list[str] | None = None
-        if getattr(self.sentence_model, "_model_type", "") == "xgboost":
-            try:
-                self._neural_head, self._neural_feature_names = FeatureAttentionHead.load(
-                    models_dir
-                )
-                log.info(
-                    "Загружена нейронная голова для объяснений (%d входов)",
-                    len(self._neural_feature_names or ()),
-                )
-            except FileNotFoundError:
-                log.info(
-                    "models/neural_head.pt не найден — категории «потерь» считаются из SHAP"
-                )
+        try:
+            self._neural_head, self._neural_feature_names = FeatureAttentionHead.load(
+                models_dir
+            )
+            log.info(
+                "Загружена нейронная голова для объяснений (%d входов)",
+                len(self._neural_feature_names or ()),
+            )
+        except FileNotFoundError:
+            log.info("neural_head.pt не найден — доли потерь из SHAP")
 
         log.info("Predictor готов.")
 
@@ -211,16 +167,9 @@ class Predictor:
             self._display_explanation_en(feats, sentence_pred),
         )
 
-        # Собираем debug-информацию: признаки, word_logprobs, SHAP values
-        debug_info = {
-            "features": feats.get("raw", {}),
-            "word_logprobs": word_logprobs if word_logprobs else [],
-        }
-        debug_info["shap_values"] = _serialize_shap_values(
-            getattr(sentence_pred, "shap_values", None),
-            self.sentence_model.feature_names,
+        debug_info = build_sentence_debug_payload(
+            feats, sentence_pred, self.sentence_model.feature_names
         )
-
         return _build_ui_result(src, mt, mt_words, overall, debug_info)
 
     # ------------------------------------------------------------------
@@ -273,16 +222,9 @@ class Predictor:
                 self._display_explanation_en(feats, sentence_pred),
             )
 
-            # Собираем debug для текущего предложения
-            debug_info = {
-                "features": feats.get("raw", {}),
-                "word_logprobs": word_logprobs if word_logprobs else [],
-            }
-            debug_info["shap_values"] = _serialize_shap_values(
-                getattr(sentence_pred, "shap_values", None),
-                self.sentence_model.feature_names,
+            debug_info = build_sentence_debug_payload(
+                feats, sentence_pred, self.sentence_model.feature_names
             )
-
             results.append(_build_ui_result(src, mt, mt_words, overall, debug_info))
 
         return results
@@ -308,13 +250,12 @@ class Predictor:
         log.info("SentenceModel и SpanModel успешно перезагружены.")
         self._neural_head = None
         self._neural_feature_names = None
-        if getattr(self.sentence_model, "_model_type", "") == "xgboost":
-            try:
-                self._neural_head, self._neural_feature_names = FeatureAttentionHead.load(
-                    self._models_dir
-                )
-            except FileNotFoundError:
-                pass
+        try:
+            self._neural_head, self._neural_feature_names = FeatureAttentionHead.load(
+                self._models_dir
+            )
+        except FileNotFoundError:
+            pass
 
     def _build_neural_input(
         self,
@@ -539,6 +480,23 @@ def _escape_html(text: str) -> str:
             .replace('"', "&quot;")
             .replace("'", "&#39;")
     )
+
+
+def build_sentence_debug_payload(
+    feats: Mapping[str, Any],
+    sentence_pred: Any,
+    feature_names: Sequence[str],
+) -> dict[str, Any]:
+    wlp = feats.get("word_logprobs") or None
+    out: dict[str, Any] = {
+        "features": feats.get("raw", {}),
+        "word_logprobs": wlp if wlp else [],
+    }
+    out["shap_values"] = _serialize_shap_values(
+        getattr(sentence_pred, "shap_values", None),
+        feature_names,
+    )
+    return out
 
 
 def _serialize_shap_values(

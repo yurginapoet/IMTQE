@@ -22,6 +22,7 @@ MQM-style агрегация штрафов за ошибки → sentence/parag
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping, Sequence
@@ -29,6 +30,8 @@ from typing import Mapping, Sequence
 import numpy as np
 
 from src.interpretation.rules import MQM_ERROR_TYPES, TypedSpan
+
+_log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -81,8 +84,7 @@ def load_mqm_weights(weights_path: str | Path | None) -> np.ndarray:
 
     path = Path(weights_path)
     if not path.exists():
-        import logging
-        logging.getLogger(__name__).warning(
+        _log.warning(
             "weights_mqm.npy не найден по пути %s — используем единичные веса",
             path,
         )
