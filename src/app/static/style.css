@@ -204,6 +204,40 @@ th {
     background: #ffffff;
 }
 
+/* Подсказка по слову (ошибка + уверенность); позиция задаётся из JS */
+.qe-token-tooltip {
+    position: fixed;
+    z-index: 9999;
+    max-width: min(420px, 92vw);
+    padding: 10px 12px;
+    border-radius: 12px;
+    background: rgba(23, 32, 51, 0.94);
+    color: #f0f4fc;
+    font-size: 0.82rem;
+    line-height: 1.45;
+    box-shadow: 0 12px 32px rgba(15, 23, 42, 0.35);
+    pointer-events: none;
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 0.08s ease;
+}
+
+.qe-token-tooltip.visible {
+    opacity: 1;
+    visibility: visible;
+}
+
+.qe-token-tooltip .tt-title {
+    font-weight: 700;
+    margin-bottom: 4px;
+    color: #fff;
+}
+
+.qe-token-tooltip .tt-meta {
+    color: #b8c5dc;
+    font-size: 0.8rem;
+}
+
 .editable-overlay {
     position: relative;
     z-index: 1;
@@ -335,7 +369,7 @@ th {
     border-radius: 20px 20px 0 0;
     border-top: 5px solid var(--blue);
     box-shadow: 0 -12px 36px rgba(30, 41, 59, 0.08);
-    max-height: 48vh;
+    max-height: min(560px, 58vh);
     overflow: auto;
 }
 
@@ -406,24 +440,139 @@ th {
     font-size: 0.9rem;
 }
 
-.feature-list {
+.meta-hint {
+    color: #5c6d86;
+    font-size: 0.84rem;
+    line-height: 1.45;
+    margin-top: 2px;
+}
+
+.feature-panel-title {
+    margin: 0 0 6px;
+    font-size: 1.02rem;
+}
+
+/* Колоночная вёрстка: карточки идут по порядку сверху вниз в колонке, колонки слева направо — без «ступенек» высоты строк как у CSS Grid. */
+.feature-groups-grid {
+    columns: 320px;
+    column-gap: 14px;
+    margin: 12px 0 20px;
+}
+
+.feature-group-card {
+    background: #f8fbff;
+    border: 1px solid #e4ebf5;
+    border-radius: 14px;
+    padding: 12px 14px 14px;
+    min-width: 0;
+    width: 100%;
+    display: inline-block;
+    vertical-align: top;
+    break-inside: avoid;
+    page-break-inside: avoid;
+    -webkit-column-break-inside: avoid;
+    margin-bottom: 12px;
+}
+
+.feature-group-title {
+    margin: 0 0 4px;
+    font-size: 0.78rem;
+    font-weight: 800;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: #5a6b82;
+    line-height: 1.25;
+}
+
+.feature-group-mass {
+    margin: 0 0 10px;
+    font-size: 0.74rem;
+    font-weight: 600;
+    color: #7a8aa3;
+    font-variant-numeric: tabular-nums;
+}
+
+.feature-group-rows {
     display: flex;
     flex-direction: column;
     gap: 10px;
-    margin: 14px 0 22px;
 }
 
-.feature-item {
+.feature-row-compact {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid rgba(228, 235, 245, 0.9);
+    font-size: 0.84rem;
+}
+
+.feature-group-rows .feature-row-compact:last-child {
+    border-bottom: none;
+    padding-bottom: 0;
+}
+
+.feature-row-metrics {
     display: grid;
-    grid-template-columns: minmax(220px, 1.6fr) minmax(220px, 2fr) 80px 80px;
-    gap: 14px;
-    align-items: center;
-    font-size: 0.88rem;
+    grid-template-columns: 1fr minmax(4.2em, auto) minmax(5.5em, auto);
+    gap: 8px 10px;
+    align-items: baseline;
 }
 
 .feature-name {
     font-weight: 600;
     color: #34445c;
+    line-height: 1.35;
+    min-width: 0;
+}
+
+.feature-hint-drop {
+    margin: 2px 0 0;
+}
+
+.feature-hint-drop summary {
+    list-style: none;
+}
+
+.feature-hint-drop summary::-webkit-details-marker {
+    display: none;
+}
+
+.feature-hint-summary {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    margin: 0;
+    border-radius: 999px;
+    border: 1px solid #c9d4e8;
+    background: #fff;
+    color: #4d6a9e;
+    font-size: 0.72rem;
+    font-weight: 800;
+    cursor: pointer;
+    line-height: 1;
+    user-select: none;
+    vertical-align: middle;
+}
+
+.feature-hint-summary:hover {
+    border-color: var(--blue);
+    color: var(--blue);
+    background: var(--blue-soft);
+}
+
+.feature-hint-body {
+    margin-top: 8px;
+    padding: 10px 12px;
+    border-radius: 10px;
+    background: #ffffff;
+    border: 1px solid #e4ebf5;
+    color: #3d4d63;
+    font-size: 0.8rem;
+    font-weight: 400;
+    line-height: 1.45;
 }
 
 .feature-impact {
@@ -431,6 +580,10 @@ th {
     grid-template-columns: 1fr 1fr;
     gap: 8px;
     align-items: center;
+}
+
+.feature-impact-compact {
+    gap: 6px;
 }
 
 .impact-lane {
@@ -538,12 +691,13 @@ th {
     cursor: pointer;
 }
 
-@media (max-width: 1100px) {
-    .feature-item {
-        grid-template-columns: 1fr;
-        gap: 8px;
+@media (max-width: 700px) {
+    .feature-groups-grid {
+        columns: 1;
     }
+}
 
+@media (max-width: 1100px) {
     .app {
         padding: 14px;
     }

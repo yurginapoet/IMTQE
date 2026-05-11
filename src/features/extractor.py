@@ -19,11 +19,11 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from src.config import Config
 from src.features import fluency, formatting, linguistic, neural, semantic, structural
+from src.features.interactions import interaction_features
 from src.features.schema import (
-    FEATURE_NAMES,
-    FEATURE_NAMES_CLASSIC,
     FEATURE_NAMES_LIGHT,
-    SEMANTIC_FEATURE_NAMES,
+    SENTENCE_FEATURE_NAMES,
+    SENTENCE_FEATURE_NAMES_CLASSIC,
 )
 
 
@@ -96,6 +96,7 @@ class FeatureExtractor:
             len(self.active_feature_names),
         )
 
+
     def _load_semantic_augmentation(self, require_neural: bool) -> None:
         if self.semantic_encoder is None:
             self._log.info("Загрузка MiniLM encoder для semantic PCA...")
@@ -140,10 +141,10 @@ class FeatureExtractor:
     @property
     def active_feature_names(self) -> list[str]:
         if self.heavy_loaded and self.semantic_augmented_loaded:
-            return FEATURE_NAMES
+            return list(SENTENCE_FEATURE_NAMES)
         if self.heavy_loaded:
-            return FEATURE_NAMES_CLASSIC
-        return FEATURE_NAMES_LIGHT
+            return list(SENTENCE_FEATURE_NAMES_CLASSIC)
+        return list(FEATURE_NAMES_LIGHT)
 
     def extract(self, src: str, mt: str) -> dict:
         """
@@ -186,6 +187,7 @@ class FeatureExtractor:
                         self.semantic_pca,
                     )
                 )
+            feats.update(interaction_features(feats))
 
         vector = np.array(
             [feats[name] for name in self.active_feature_names],
@@ -245,7 +247,7 @@ class FeatureExtractor:
             if self.semantic_augmented_loaded
             else None
         )
-        feature_names = self.active_feature_names
+        out_names = self.active_feature_names
 
         results = []
         for idx, mt in enumerate(mts):
@@ -262,8 +264,9 @@ class FeatureExtractor:
             )
             word_logprobs = fluency_result.pop("word_logprobs")
             feats.update(fluency_result)
+            feats.update(interaction_features(feats))
 
-            vector = np.array([feats[name] for name in feature_names], dtype=np.float32)
+            vector = np.array([feats[name] for name in out_names], dtype=np.float32)
             results.append(
                 {
                     "vector": vector,

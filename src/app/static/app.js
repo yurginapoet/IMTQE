@@ -3,6 +3,8 @@ let nextId = 1;
 let currentSegmentId = null;
 let activeErrorHighlight = null;
 let modelReady = false;
+/** @type {HTMLElement | null} */
+let tokenTooltipEl = null;
 
 const tbody = document.getElementById('segments-tbody');
 const addBtn = document.getElementById('add-segment-btn');
@@ -13,41 +15,336 @@ const detailTitle = document.getElementById('detail-segment-title');
 const detailContent = document.getElementById('detail-content');
 const closeDetailBtn = document.getElementById('close-detail-btn');
 
-const FEATURE_LABELS = {
-    length_ratio: 'Соотношение длин (mt/src)',
-    abs_length_diff: 'Абсолютная разница длин',
-    token_count_diff: 'Разница в количестве токенов',
-    src_length: 'Длина источника (слова)',
-    mt_length: 'Длина перевода (слова)',
-    digit_match_ratio: 'Совпадение чисел',
-    punct_ratio: 'Соотношение пунктуации',
-    quotes_mismatch: 'Несовпадение кавычек',
-    date_format_error: 'Ошибка формата даты',
-    oov_ratio: 'Доля слов вне словаря',
-    type_token_ratio: 'Лексическое разнообразие',
-    avg_token_length: 'Средняя длина слова',
-    entity_overlap_ratio: 'Пересечение NER',
-    agreement_errors: 'Ошибки согласования',
-    syntax_depth: 'Глубина синтаксиса',
-    formal_ratio: 'Доля формальной лексики',
-    cosine_similarity: 'Косинусное сходство (LaBSE)',
-    embedding_distance: 'Евклидово расстояние (LaBSE)',
-    perplexity: 'Перплексия (ruGPT)',
-    mean_log_prob: 'Средний log likelihood',
-    token_ppl_variance: 'Дисперсия вероятностей',
-    min_token_log_prob: 'Минимальный log prob',
+/**
+ * Короткие названия и развёрнутые подсказки (контекст оценки ошибок перевода EN→RU).
+ * Ключи совпадают с сырыми признаками из FeatureExtractor / schema.
+ */
+const FEATURE_REGISTRY = {
+
+    // ─── ACCURACY ──────────────────────────────────────────────
+  
+    cosine_similarity: {
+      group: 'Accuracy',
+      label: 'Смысл передан',
+      hint: 'Насколько близок смысл перевода к оригиналу по оценке нейросети (LaBSE). Низкое значение — вероятная потеря или искажение смысла: пропуск важной мысли, неверная интерпретация, пересказ вместо перевода.',
+    },
+    embedding_distance: {
+      group: 'Accuracy',
+      label: 'Смысловой сдвиг',
+      hint: 'Насколько далеко перевод «улетел» от оригинала в пространстве смыслов (LaBSE). Большое расстояние усиливает сигнал о смысловом искажении — даже если отдельные слова похожи.',
+    },
+    entity_overlap_ratio: {
+      group: 'Accuracy · Omission',
+      label: 'Сохранность имён и терминов',
+      hint: 'Какая доля имён собственных, организаций и ключевых терминов из оригинала нашлась в переводе. Низкое значение — возможный пропуск или замена: имя человека, название компании, географический объект потеряны или переданы иначе.',
+    },
+    digit_match_ratio: {
+      group: 'Accuracy · Mistranslation',
+      label: 'Числа переведены верно',
+      hint: 'Совпадают ли числовые значения между оригиналом и переводом. Расхождение указывает на фактическую ошибку: перепутана цифра, изменён порядок величин, число пропущено или добавлено.',
+    },
+    length_ratio: {
+      group: 'Accuracy · Omission / Addition',
+      label: 'Баланс объёма перевода',
+      hint: 'Насколько перевод пропорционален оригиналу по длине. Сильное сжатие — подозрение на пропуск (omission); сильное раздувание — возможное добавление лишнего (addition) или «водянистый» стиль.',
+    },
+    abs_length_diff: {
+      group: 'Accuracy · Omission / Addition',
+      label: 'Разница объёма (слов)',
+      hint: 'На сколько слов перевод длиннее или короче оригинала. Вместе с балансом объёма помогает различить нормальное расширение при переводе EN→RU от реального пропуска или излишества.',
+    },
+    normed_length_diff: {
+      group: 'Accuracy · Omission / Addition',
+      label: 'Относительная разница объёма',
+      hint: 'То же расхождение длины, но нормированное на размер оригинала — корректно сравнивает короткие и длинные предложения. Большое значение при коротком предложении — тревожнее, чем такое же при длинном.',
+    },
+  
+    // ─── FLUENCY ───────────────────────────────────────────────
+  
+    perplexity: {
+      group: 'Fluency',
+      label: 'Естественность текста',
+      hint: 'Насколько перевод звучит по-русски по оценке языковой модели (ruGPT). Высокая перплексия — текст «удивляет» модель: нарушен порядок слов, сочетания слов неестественны, предложение трудно читается вслух.',
+    },
+    mean_log_prob: {
+      group: 'Fluency',
+      label: 'Связность текста',
+      hint: 'Средняя «привычность» каждого слова для языковой модели в данном контексте. Низкое значение — в тексте много слов, которые модель не ожидала увидеть: возможны неудачные формулировки, кальки с английского, неправильный порядок слов.',
+    },
+    min_token_log_prob: {
+      group: 'Fluency',
+      label: 'Самое подозрительное слово',
+      hint: 'Худший токен в переводе по оценке языковой модели — слово, которое меньше всего вписывается в контекст. Часто совпадает с реальным местом ошибки: неверная форма слова, неподходящий термин, случайно вставленное слово.',
+    },
+    token_ppl_variance: {
+      group: 'Fluency',
+      label: 'Неравномерность качества',
+      hint: 'Насколько неровно распределена «странность» по словам перевода. Большой разброс означает, что большинство текста нормально, но одно-два слова сильно выбиваются — типичный паттерн для точечных ошибок в иначе хорошем переводе.',
+    },
+    agreement_errors: {
+      group: 'Fluency · Morphology',
+      label: 'Грамматическое согласование',
+      hint: 'Признаки нарушений согласования в русском тексте: род, число, падеж. Типичные ошибки — «красивый решение», «два переводов», «с помощи». Эвристика, а не полный разбор, но хорошо ловит грубые морфологические сбои.',
+    },
+    syntax_depth: {
+      group: 'Fluency · Syntax',
+      label: 'Сложность синтаксиса',
+      hint: 'Насколько глубока синтаксическая структура перевода по сравнению с оригиналом. Сильное упрощение — перевод разбит на короткие кусочки или склеен в нечитаемый монолит; сильное усложнение — оригинальная структура перестроена до неузнаваемости.',
+    },
+    oov_ratio: {
+      group: 'Fluency · Spelling',
+      label: 'Необычные слова',
+      hint: 'Доля слов, редких или нетипичных для языковой модели. Может указывать на опечатки, несуществующие словоформы, кальки («имплементировать» вместо «реализовать»), или имена, которые транслитерированы неверно.',
+    },
+    type_token_ratio: {
+      group: 'Fluency · LexicalChoice',
+      label: 'Лексическое разнообразие',
+      hint: 'Насколько разнообразна лексика перевода. Слишком низкое значение — перевод монотонный, одно слово повторяется там, где уместны синонимы; слишком высокое при коротком тексте может указывать на смешение регистров.',
+    },
+    avg_token_length: {
+      group: 'Fluency · LexicalChoice',
+      label: 'Длина слов (уровень сложности)',
+      hint: 'Средняя длина слова в переводе. Сильное расхождение с оригиналом иногда сигнализирует о неверном выборе слова: замена простого термина тяжёлым канцеляризмом или наоборот — упрощение там, где нужна точность.',
+    },
+    token_count_diff: {
+      group: 'Fluency · Syntax',
+      label: 'Расхождение числа токенов',
+      hint: 'Разница в количестве токенов после токенизации. Помогает ловить слияние или расщепление конструкций: два слова слиплись в одно, или одно слово разбилось на несвязные части — симптом нарушения синтаксических границ.',
+    },
+  
+    // ─── LOCALE ────────────────────────────────────────────────
+  
+    quotes_mismatch: {
+      group: 'Locale · Quotes',
+      label: 'Оформление кавычек',
+      hint: 'Несоответствие кавычек между оригиналом и переводом. Для русского текста ожидаются «ёлочки» или „лапки", а не "прямые" кавычки. Также ловит несбалансированные или вложенные кавычки — типичный локализационный дефект.',
+    },
+    date_format_error: {
+      group: 'Locale · DateFormat',
+      label: 'Формат даты',
+      hint: 'Несоответствие формата записи дат: порядок дня, месяца и года, разделители, буквенные сокращения. Например, «March 5» должно стать «5 марта», а не «Март 5» или «05/03».',
+    },
+    punct_ratio: {
+      group: 'Locale · Punctuation',
+      label: 'Пунктуация',
+      hint: 'Соотношение знаков препинания в переводе и оригинале. Заметное расхождение — лишние или пропущенные запятые, точки, скобки; может нарушать структуру предложения или смысл перечисления.',
+    },
+  
+    // ─── STYLE ─────────────────────────────────────────────────
+  
+    formal_ratio: {
+      group: 'Style · Register',
+      label: 'Регистр речи',
+      hint: 'Насколько формален или разговорен стиль перевода относительно оригинала. Технический текст, переведённый в разговорном ключе, или официальный документ с просторечиями — оба случая нарушают регистр и ожидания читателя.',
+    },
+  
+    // ─── КОНТЕКСТНЫЕ (без MQM-категории) ───────────────────────
+  
+    src_length: {
+      group: 'Контекст',
+      label: 'Длина оригинала',
+      hint: 'Число слов в исходном английском предложении. Само по себе не ошибка — используется моделью как контекст при интерпретации других признаков: короткое предложение судится иначе, чем длинный абзац.',
+    },
+    mt_length: {
+      group: 'Контекст',
+      label: 'Длина перевода',
+      hint: 'Число слов в русском переводе. Контекстный признак: задаёт масштаб для оценки разницы длин и расчёта норм. EN→RU обычно даёт небольшое увеличение длины — это нормально.',
+    },
+  
+    // ─── СОСТАВНЫЕ ПРИЗНАКИ (INTERACTION FEATURES) ─────────────
+  
+    cosine_x_length_ok: {
+      group: 'Accuracy',
+      label: 'Смысл при нормальной длине',
+      hint: 'Комбинация: хорошая смысловая близость при подозрительно отклонённой длине. Ловит случаи, когда текст «похож» на оригинал по смыслу, но при этом слишком короткий (вероятный пропуск) или слишком длинный (добавление).',
+    },
+    cosine_per_logppl: {
+      group: 'Accuracy + Fluency',
+      label: 'Смысл относительно странности',
+      hint: 'Отношение смысловой близости к «странности» текста для языковой модели. Высокий смысл при высокой странности — перевод передаёт идею, но сформулирован неестественно. Низкий смысл при низкой странности — текст гладкий, но говорит о другом.',
+    },
+    entity_x_cosine: {
+      group: 'Accuracy · Omission',
+      label: 'Потеря терминов при смысловом сдвиге',
+      hint: 'Совместный сигнал: пропуск имён или терминов усилен общим смысловым расхождением. Особенно важен для текстов с именами, датами, организациями — потеря одного термина на фоне переосмысленного предложения.',
+    },
+    oov_x_bad_cosine: {
+      group: 'Fluency + Accuracy',
+      label: 'Странные слова при смысловом сдвиге',
+      hint: 'Необычная лексика в сочетании с плохой смысловой близостью — маркер «двойного провала»: текст и написан странно, и говорит не о том. Часто встречается при кальках или галлюцинациях МТ.',
+    },
+    logprob_spike: {
+      group: 'Fluency',
+      label: 'Всплеск неуверенности',
+      hint: 'Разрыв между средней и минимальной «привычностью» токенов. Большой всплеск — в целом нормальный текст с одним-двумя словами, которые резко «проваливаются». Почти всегда указывает на конкретное место ошибки.',
+    },
+    variance_x_bad_cosine: {
+      group: 'Fluency + Accuracy',
+      label: 'Неравномерность + смысловой сдвиг',
+      hint: 'Неравномерная уверенность языковой модели в сочетании с плохой смысловой близостью — типичный паттерн серьёзных смысловых ошибок: предложение «спотыкается» и при этом уводит смысл в сторону.',
+    },
+    digit_x_entity: {
+      group: 'Accuracy · Mistranslation',
+      label: 'Числа и термины вместе',
+      hint: 'Совместный сигнал по числам и именованным сущностям. Усиливает тревогу при ошибках в «фактологическом ядре» предложения: цифра неверна и при этом потерян термин — вместе это почти наверняка фактическая ошибка.',
+    },
+    formal_x_cosine: {
+      group: 'Style + Accuracy',
+      label: 'Сдвиг регистра при смысловом сдвиге',
+      hint: 'Нарушение стиля, наложившееся на смысловое расхождение. Хуже, чем по отдельности: перевод не только в другом тоне, но и говорит о другом.',
+    },
+    dist_x_logppl: {
+      group: 'Accuracy + Fluency',
+      label: 'Далеко по смыслу и по языку',
+      hint: 'Произведение семантического расстояния (LaBSE) и странности текста (ruGPT). Самый «широкий» сигнал о провале перевода: плохо и по содержанию, и по форме одновременно.',
+    },
+    log_perplexity: {
+      group: 'Fluency',
+      label: 'Неестественность (логарифм)',
+      hint: 'Логарифм перплексии для стабильного сравнения между предложениями разной длины. Позволяет корректно сопоставить «неестественность» короткого и длинного предложений на одной шкале.',
+    },
+  
+    // ─── PCA / СКРЫТАЯ СЕМАНТИКА ───────────────────────────────
+  
+    __agg_semantic_neg__: {
+      group: 'Скрытая семантика',
+      label: '↓ Латентный сигнал (снижает оценку)',
+      hint: 'Суммарный вклад скрытых семантических факторов, которые тянут оценку вниз. Модель уловила паттерн в тексте, указывающий на проблему — но этот паттерн не раскладывается на одну понятную категорию. Если здесь большой отрицательный вклад, стоит внимательнее перечитать перевод целиком.',
+    },
+    __agg_semantic_pos__: {
+      group: 'Скрытая семантика',
+      label: '↑ Латентный сигнал (поднимает оценку)',
+      hint: 'Суммарный вклад скрытых семантических факторов, которые говорят в пользу перевода. Модель нашла паттерны качественного текста, которые сложно объяснить единственным словом.',
+    },
+  };
+
+/** Отображаемые русские заголовки блоков (ключ — внутренний group из FEATURE_REGISTRY). */
+const FEATURE_GROUP_LABEL_RU = {
+    Accuracy: 'Точность (смысл)',
+    'Accuracy · Omission': 'Точность · пропуски сущностей',
+    'Accuracy · Mistranslation': 'Точность · искажения фактов',
+    'Accuracy · Omission / Addition': 'Точность · объём текста',
+    Fluency: 'Грамотность',
+    'Fluency · Morphology': 'Грамотность · морфология',
+    'Fluency · Syntax': 'Грамотность · синтаксис',
+    'Fluency · Spelling': 'Грамотность · орфография и OOV',
+    'Fluency · LexicalChoice': 'Грамотность · лексика',
+    'Locale · Quotes': 'Локаль · кавычки',
+    'Locale · DateFormat': 'Локаль · даты',
+    'Locale · Punctuation': 'Локаль · пунктуация',
+    'Style · Register': 'Стиль · регистр',
+    Контекст: 'Контекст',
+    'Accuracy + Fluency': 'Точность и грамотность',
+    'Fluency + Accuracy': 'Грамотность и точность',
+    'Style + Accuracy': 'Стиль и точность',
+    'Скрытая семантика': 'Скрытая семантика (PCA)',
 };
 
-function getFeatureDisplayName(key) {
-    if (FEATURE_LABELS[key]) return FEATURE_LABELS[key];
+function featureGroupTitleRu(group) {
+    if (!group) return '';
+    return FEATURE_GROUP_LABEL_RU[group] || group;
+}
+
+/** При равной сумме |SHAP| по блокам — порядок как в FEATURE_REGISTRY (стабильный tie-break). */
+const FEATURE_GROUP_ORDER = (() => {
+    const out = [];
+    const seen = new Set();
+    for (const meta of Object.values(FEATURE_REGISTRY)) {
+        if (meta.group && !seen.has(meta.group)) {
+            seen.add(meta.group);
+            out.push(meta.group);
+        }
+    }
+    return out;
+})();
+
+function getFeatureRegistryMeta(key) {
+    return FEATURE_REGISTRY[key] || null;
+}
+
+function getFeatureGroup(key) {
+    const m = getFeatureRegistryMeta(key);
+    if (m?.group) return m.group;
+    if (key.startsWith('semantic_')) return 'Скрытая семантика';
+    return 'Прочее';
+}
+
+function getFeatureLabel(key) {
+    if (FEATURE_REGISTRY[key]) return FEATURE_REGISTRY[key].label;
     if (key.startsWith('semantic_')) {
-        const suffix = key.split('_')[1] || '';
-        return `Semantic PCA ${suffix}`;
+        return `PCA-компонента ${key.replace('semantic_', '')}`;
     }
     return key;
 }
 
+function getFeatureHint(key) {
+    if (FEATURE_REGISTRY[key]) return FEATURE_REGISTRY[key].hint;
+    if (key.startsWith('semantic_')) {
+        return 'Отдельная компонента PCA вектора мини-энкодера; смысл оси не фиксирован и не трактуется как тип ошибки. Для обзора используйте агрегаты «в сторону лучше/хуже» выше в списке.';
+    }
+    return 'Признак участвует в sentence-модели; точный смысл вклада задаётся обучением и SHAP.';
+}
+
+/** Мин. доля от суммарного штрафа (только отрицательный SHAP), ниже — не показываем. */
+const MIN_LOSS_SHARE = 0.005;
+
+/**
+ * Только «потери» относительно идеала: берём признаки с SHAP<0,
+ * доля i = |SHAP_i| / sum_j|SHAP_j^-|, отбрасываем <0.5%, перенормируем остаток к 100%.
+ * Возвращает строки с полем lossFraction (0..1) для отображения.
+ */
+function buildLossOnlyFeatureRows(combined) {
+    const neg = combined.filter((x) => (Number(x.shap) || 0) < 0);
+    const totalAbs = neg.reduce((s, x) => s + Math.abs(Number(x.shap) || 0), 0);
+    if (totalAbs <= 1e-12) return [];
+    const withPart = neg.map((x) => ({
+        ...x,
+        part: Math.abs(Number(x.shap) || 0) / totalAbs,
+    }));
+    const kept = withPart.filter((x) => x.part >= MIN_LOSS_SHARE);
+    const s2 = kept.reduce((t, x) => t + x.part, 0);
+    if (s2 <= 1e-12) return [];
+    return kept
+        .map((x) => ({
+            ...x,
+            lossFraction: x.part / s2,
+        }))
+        .sort((a, b) => (Number(b.lossFraction) || 0) - (Number(a.lossFraction) || 0));
+}
+
+function aggregateSemanticShapRows(semanticEntries) {
+    let sumPos = 0;
+    let sumNeg = 0;
+    for (const row of semanticEntries) {
+        const s = Number(row.shap) || 0;
+        if (s > 0) sumPos += s;
+        else if (s < 0) sumNeg += s;
+    }
+    const rows = [];
+    if (sumNeg !== 0) {
+        rows.push({
+            key: '__agg_semantic_neg__',
+            value: '—',
+            shap: sumNeg,
+        });
+    }
+    if (sumPos !== 0) {
+        rows.push({
+            key: '__agg_semantic_pos__',
+            value: '—',
+            shap: sumPos,
+        });
+    }
+    return rows;
+}
+
 function init() {
+    tokenTooltipEl = document.createElement('div');
+    tokenTooltipEl.id = 'qe-token-tooltip';
+    tokenTooltipEl.className = 'qe-token-tooltip';
+    tokenTooltipEl.setAttribute('role', 'tooltip');
+    document.body.appendChild(tokenTooltipEl);
+
     addSegment();
     pollStatus();
 
@@ -63,6 +360,8 @@ function init() {
     tbody.addEventListener('input', handleTableInput);
     tbody.addEventListener('click', handleTableClick);
     tbody.addEventListener('scroll', handleEditorScroll, true);
+    tbody.addEventListener('mousemove', handleEditorShellMouseMove);
+    tbody.addEventListener('mouseleave', hideTokenTooltip, true);
 }
 
 init();
@@ -343,7 +642,12 @@ function renderHighlightedMt(text, errors, segmentId) {
 
         const classes = ['token-highlight', meta.severity === 'BAD-major' ? 'token-major' : 'token-minor'];
         if (meta.active) classes.push('token-active');
-        return `<span class="${classes.join(' ')}">${escapeHtml(part.value)}</span>`;
+        const label = meta.error_label || meta.error_type || '';
+        const et = escapeAttr(meta.error_type || '');
+        const el = escapeAttr(label);
+        const conf = meta.confidence != null ? Math.round(Number(meta.confidence) * 100) : '';
+        const sev = escapeAttr(meta.severity || '');
+        return `<span class="${classes.join(' ')}" data-token-idx="${part.tokenIndex}" data-severity="${sev}" data-error-type="${et}" data-error-label="${el}" data-confidence="${conf}">${escapeHtml(part.value)}</span>`;
     }).join('');
 }
 
@@ -367,29 +671,102 @@ function tokenizeText(text) {
 
 function buildTokenMeta(errors, segmentId) {
     const meta = new Map();
+
+    function better(prev, cand) {
+        if (!prev) return cand;
+        const pMaj = prev.severity === 'BAD-major';
+        const cMaj = cand.severity === 'BAD-major';
+        if (cMaj && !pMaj) return cand;
+        if (pMaj && !cMaj) return prev;
+        const pc = Number(prev.confidence) || 0;
+        const cc = Number(cand.confidence) || 0;
+        return cc >= pc ? cand : prev;
+    }
+
     for (const err of errors || []) {
         const start = Number(err.start_idx);
         const end = Number(err.end_idx);
         if (!Number.isFinite(start) || !Number.isFinite(end)) continue;
 
+        const candBase = {
+            severity: err.severity,
+            error_type: err.error_type || '',
+            error_label: err.error_label || err.error_type || '',
+            confidence: err.confidence != null ? Number(err.confidence) : 0,
+            active: false,
+        };
+
         for (let tokenIndex = start; tokenIndex <= end; tokenIndex += 1) {
             const prev = meta.get(tokenIndex);
-            const isMajor = err.severity === 'BAD-major';
-            const active = (
-                activeErrorHighlight
-                && activeErrorHighlight.segmentId === segmentId
-                && tokenIndex >= activeErrorHighlight.startIdx
-                && tokenIndex <= activeErrorHighlight.endIdx
-            );
-
-            if (!prev || (isMajor && prev.severity !== 'BAD-major')) {
-                meta.set(tokenIndex, { severity: err.severity, active });
-            } else if (active) {
-                prev.active = true;
-            }
+            meta.set(tokenIndex, better(prev, { ...candBase }));
         }
     }
+
+    for (const [tokenIndex, row] of meta) {
+        const active = (
+            activeErrorHighlight
+            && activeErrorHighlight.segmentId === segmentId
+            && tokenIndex >= activeErrorHighlight.startIdx
+            && tokenIndex <= activeErrorHighlight.endIdx
+        );
+        row.active = active;
+    }
     return meta;
+}
+
+function hideTokenTooltip() {
+    if (!tokenTooltipEl) return;
+    tokenTooltipEl.classList.remove('visible');
+    tokenTooltipEl.innerHTML = '';
+}
+
+function handleEditorShellMouseMove(event) {
+    const shell = event.target.closest('.editor-shell');
+    if (!shell || !tokenTooltipEl) {
+        hideTokenTooltip();
+        return;
+    }
+
+    const ta = shell.querySelector('.mt-area');
+    const highlight = shell.querySelector('[data-role="mt-highlight"]');
+    if (!ta || !highlight) return;
+
+    const prevPe = ta.style.pointerEvents;
+    ta.style.pointerEvents = 'none';
+    let el = null;
+    try {
+        el = document.elementFromPoint(event.clientX, event.clientY);
+    } finally {
+        ta.style.pointerEvents = prevPe || '';
+    }
+
+    const span = el && el.closest && el.closest('.token-highlight');
+    if (!span || !highlight.contains(span)) {
+        hideTokenTooltip();
+        return;
+    }
+
+    const label = span.dataset.errorLabel || span.dataset.errorType || 'Ошибка';
+    const typ = span.dataset.errorType || '';
+    const conf = span.dataset.confidence;
+    const sev = span.dataset.severity === 'BAD-major' ? 'серьёзная (major)' : 'незначительная (minor)';
+    const strength = conf !== '' && conf !== undefined ? `${conf}% уверенности модели` : 'уверенность неизвестна';
+
+    tokenTooltipEl.innerHTML = `
+        <div class="tt-title">${escapeHtml(label)}</div>
+        <div class="tt-meta">${escapeHtml(typ)} · ${escapeHtml(sev)}</div>
+        <div class="tt-meta">${escapeHtml(strength)}</div>
+    `;
+
+    const pad = 14;
+    let x = event.clientX + pad;
+    let y = event.clientY + pad;
+    const rect = tokenTooltipEl.getBoundingClientRect();
+    if (x + rect.width > window.innerWidth - 8) x = event.clientX - rect.width - pad;
+    if (y + rect.height > window.innerHeight - 8) y = event.clientY - rect.height - pad;
+    tokenTooltipEl.style.left = `${Math.max(8, x)}px`;
+    tokenTooltipEl.style.top = `${Math.max(8, y)}px`;
+    tokenTooltipEl.classList.add('visible');
 }
 
 function syncEditorScroll(textarea) {
@@ -426,14 +803,25 @@ function renderDetail(segmentId) {
     const scorePercent = (r.score * 100).toFixed(0);
     detailTitle.textContent = `Сегмент #${getDisplayIndex(seg.id)} — Оценка: ${scorePercent}%`;
 
+    const ciLowPct = r.ci_low !== undefined ? (r.ci_low * 100).toFixed(0) : null;
+    const ciHighPct = r.ci_high !== undefined ? (r.ci_high * 100).toFixed(0) : null;
+    const mqmPct = r.mqm_score !== undefined ? (r.mqm_score * 100).toFixed(0) : null;
+
     let html = `
         <div class="score-summary">
             <div class="big-score">${scorePercent}%</div>
             <div class="progress-bar">
                 <div class="progress-fill" style="width:${scorePercent}%"></div>
             </div>
-            ${r.mqm_score !== undefined ? `<div class="meta">MQM: ${r.mqm_score.toFixed(2)}</div>` : ''}
-            ${r.ci_low !== undefined && r.ci_high !== undefined ? `<div class="meta">CI 95%: ${(r.ci_low * 100).toFixed(0)}–${(r.ci_high * 100).toFixed(0)}%</div>` : ''}
+            <p class="meta-hint">Основная оценка — предсказание sentence-модели: насколько высоко качество перевода на шкале от 0% до 100% (чем выше, тем лучше).</p>
+            ${r.mqm_score !== undefined ? `
+                <div class="meta">MQM-индекс: ${mqmPct}% (внутренний 0–1: ${r.mqm_score.toFixed(2)})</div>
+                <p class="meta-hint">Отдельная шкала по найденным словесным ошибкам (штрафы MQM): 100% означает «нет штрафов за размеченные BAD-спаны»; чем ниже, тем больше суммарный штраф с учётом серьёзности (major/minor) и уверенности span-модели. Это не то же самое, что процент над прогресс-баром, а дополнение к нему.</p>
+            ` : ''}
+            ${ciLowPct != null && ciHighPct != null ? `
+                <div class="meta">Непараметрический доверительный интервал 95% для оценки качества: ${ciLowPct}–${ciHighPct}%</div>
+                <p class="meta-hint">По sentence-модели: если бы мы много раз слегка меняли вход, в таком диапазоне с большой вероятностью оказалась бы «истинная» оценка на той же шкале 0–100%. Узкий интервал — модель увереннее; широкий — больше неопределённость.</p>
+            ` : ''}
         </div>
     `;
 
@@ -446,20 +834,19 @@ function renderDetail(segmentId) {
             shap: getShapValue(shapValues, key),
         }));
 
-        const classicFeatures = featureEntries
-            .filter((item) => !item.key.startsWith('semantic_'))
-            .sort((a, b) => Math.abs(b.shap) - Math.abs(a.shap));
+        const semanticRows = featureEntries.filter((item) => item.key.startsWith('semantic_'));
+        const classicRows = featureEntries.filter((item) => !item.key.startsWith('semantic_'));
+        const aggSemantic = aggregateSemanticShapRows(semanticRows);
+        const combined = [...classicRows, ...aggSemantic];
+        const lossRows = buildLossOnlyFeatureRows(combined);
 
-        const semanticFeatures = featureEntries
-            .filter((item) => item.key.startsWith('semantic_'))
-            .sort((a, b) => Math.abs(b.shap) - Math.abs(a.shap));
-
-        html += renderFeatureSection('Интерпретируемые признаки', classicFeatures);
-        html += renderFeatureSection(
-            `Semantic PCA компоненты (${semanticFeatures.length})`,
-            semanticFeatures,
-            'PCA-компоненты латентные: по ним можно видеть силу и знак вклада, но напрямую назвать их “терминологией” или “грамматикой” нельзя.',
-        );
+        if (lossRows.length) {
+            html += renderFeatureGroupsPanel(lossRows);
+        } else if (combined.some((x) => (Number(x.shap) || 0) !== 0)) {
+            html += '<p class="semantic-note">Нет заметного отрицательного вклада признаков (снижающих оценку от идеала 100%), либо все доли ниже 0.5% от суммарного штрафа.</p>';
+        } else {
+            html += '<p class="semantic-note">SHAP-вклады для этой пары около нуля.</p>';
+        }
     } else {
         html += '<p><em>Debug-признаки недоступны.</em></p>';
     }
@@ -498,34 +885,95 @@ function renderDetail(segmentId) {
     if (manualBtn) manualBtn.addEventListener('click', () => startManualFeedback(seg.id));
 }
 
-function renderFeatureSection(title, items, note = '') {
+function sumLossFractionForGroup(groupItems) {
+    return groupItems.reduce((s, it) => s + (Number(it.lossFraction) || 0), 0);
+}
+
+function sortGroupsByLossFraction(groups, byGroup) {
+    const registryRank = (g) => {
+        const i = FEATURE_GROUP_ORDER.indexOf(g);
+        return i === -1 ? 1e6 : i;
+    };
+    return [...groups].sort((a, b) => {
+        const ta = sumLossFractionForGroup(byGroup.get(a));
+        const tb = sumLossFractionForGroup(byGroup.get(b));
+        if (tb !== ta) return tb - ta;
+        const ra = registryRank(a);
+        const rb = registryRank(b);
+        if (ra !== rb) return ra - rb;
+        return a.localeCompare(b, 'ru');
+    });
+}
+
+function formatLossSharePercent(lossFraction) {
+    const pct = (Number(lossFraction) || 0) * 100;
+    const decimals = pct >= 1 ? 2 : pct >= 0.01 ? 3 : 4;
+    return `${pct.toFixed(decimals)}%`;
+}
+
+function renderFeatureGroupsPanel(items) {
     if (!items.length) return '';
 
-    const maxAbsShap = Math.max(...items.map((item) => Math.abs(item.shap)), 1e-6);
-    let html = `<h4>${title}</h4>`;
-    if (note) html += `<p class="semantic-note">${note}</p>`;
-    html += '<div class="feature-list">';
-
+    const maxFrac = Math.max(...items.map((item) => Number(item.lossFraction) || 0), 1e-6);
+    const byGroup = new Map();
     for (const item of items) {
-        const width = Math.min((Math.abs(item.shap) / maxAbsShap) * 100, 100);
-        const displayValue = typeof item.value === 'number' ? item.value.toFixed(3) : String(item.value);
-        const displayShap = `${item.shap > 0 ? '+' : ''}${item.shap.toFixed(3)}`;
+        const g = getFeatureGroup(item.key);
+        if (!byGroup.has(g)) byGroup.set(g, []);
+        byGroup.get(g).push(item);
+    }
+    for (const g of byGroup.keys()) {
+        byGroup.set(
+            g,
+            [...byGroup.get(g)].sort(
+                (a, b) => (Number(b.lossFraction) || 0) - (Number(a.lossFraction) || 0),
+            ),
+        );
+    }
 
-        html += `
-            <div class="feature-item">
-                <span class="feature-name">${escapeHtml(getFeatureDisplayName(item.key))}</span>
-                <div class="feature-impact">
-                    <div class="impact-lane impact-positive">
-                        ${item.shap > 0 ? `<div class="impact-fill positive" style="width:${width}%"></div>` : ''}
-                    </div>
+    const note =
+        'Показаны только признаки, которые по SHAP снижают оценку относительно идеала (100%). Число в строке — доля в суммарном штрафе после отсечения <0.5% и перенормировки к 100%. Карточки блоков — по убыванию суммы долей в блоке.';
+
+    let html = '<h4 class="feature-panel-title">Доли штрафа по признакам (от идеала 100%)</h4>';
+    html += `<p class="semantic-note">${escapeHtml(note)}</p>`;
+    html += '<div class="feature-groups-grid">';
+
+    for (const group of sortGroupsByLossFraction([...byGroup.keys()], byGroup)) {
+        const groupItems = byGroup.get(group);
+        const mass = sumLossFractionForGroup(groupItems);
+        const titleRu = featureGroupTitleRu(group);
+        html += '<section class="feature-group-card">';
+        html += `<h5 class="feature-group-title">${escapeHtml(titleRu)}</h5>`;
+        html += `<div class="feature-group-mass" title="Сумма долей штрафа по признакам этого блока (после перенормировки, в сумме по всем блокам 100%)">Σ доля ${escapeHtml(formatLossSharePercent(mass))}</div>`;
+        html += '<div class="feature-group-rows">';
+
+        for (const item of groupItems) {
+            const frac = Number(item.lossFraction) || 0;
+            const width = Math.min((frac / maxFrac) * 100, 100);
+            const displayValue = typeof item.value === 'number' ? item.value.toFixed(3) : String(item.value);
+            const displayShare = formatLossSharePercent(frac);
+            const fname = getFeatureLabel(item.key);
+            const fhint = getFeatureHint(item.key);
+
+            html += `
+            <div class="feature-row-compact">
+                <div class="feature-row-metrics">
+                    <span class="feature-name">${escapeHtml(fname)}</span>
+                    <span class="feature-value">${escapeHtml(displayValue)}</span>
+                    <span class="feature-shap negative">${escapeHtml(displayShare)}</span>
+                </div>
+                <details class="feature-hint-drop">
+                    <summary class="feature-hint-summary" aria-label="Описание признака">?</summary>
+                    <div class="feature-hint-body">${escapeHtml(fhint)}</div>
+                </details>
+                <div class="feature-impact feature-impact-compact">
                     <div class="impact-lane impact-negative">
-                        ${item.shap < 0 ? `<div class="impact-fill negative" style="width:${width}%"></div>` : ''}
+                        <div class="impact-fill negative" style="width:${width}%"></div>
                     </div>
                 </div>
-                <span class="feature-value">${escapeHtml(displayValue)}</span>
-                <span class="feature-shap ${item.shap >= 0 ? 'positive' : 'negative'}">${displayShap}</span>
-            </div>
-        `;
+            </div>`;
+        }
+
+        html += '</div></section>';
     }
 
     html += '</div>';
@@ -620,4 +1068,14 @@ function escapeHtml(str) {
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;');
+}
+
+function escapeAttr(str) {
+    if (str == null) return '';
+    return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/"/g, '&quot;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/\n/g, ' ');
 }

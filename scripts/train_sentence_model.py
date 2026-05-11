@@ -41,14 +41,22 @@ from xgboost import DMatrix
 from xgboost import XGBRegressor
 from xgboost.callback import TrainingCallback as _XGBTrainingCallback
 
-from ngboost import NGBRegressor
-from ngboost.distns import Beta
+# from ngboost import NGBRegressor
+# from ngboost.distns import Beta
+
+from scipy.optimize import minimize_scalar
+from scipy.stats import pearsonr
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from src.features.schema import FEATURE_NAMES
+from src.features.interactions import add_interaction_columns_to_dataframe
+from src.features.schema import (
+    FEATURE_NAMES,
+    INTERACTION_FEATURE_NAMES,
+    SENTENCE_FEATURE_NAMES,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -67,20 +75,81 @@ DEFAULT_SYNTHETIC_WEIGHT = 0.10
 # Вспомогательные функции
 # ---------------------------------------------------------------------------
 
+def add_interaction_features(df: pd.DataFrame, feature_cols: list[str]) -> tuple[pd.DataFrame, list[str]]:
+    """
+    Гарантирует колонки interaction (см. src.features.interactions) и порядок SENTENCE_FEATURE_NAMES.
+    Если parquet уже содержит все interaction, только нормализует список колонок.
+    """
+    df = df.copy()
+    have_all_inter = all(name in df.columns for name in INTERACTION_FEATURE_NAMES)
+    if not have_all_inter:
+        df = add_interaction_columns_to_dataframe(df)
+    tail = [n for n in INTERACTION_FEATURE_NAMES if n not in feature_cols]
+    extended_cols = list(feature_cols) + tail
+    log.info("Interaction признаков: %d (итого колонок модели: %d)", len(INTERACTION_FEATURE_NAMES), len(extended_cols))
+    return df, extended_cols
+
+def build_shap_explainer(
+    model: Any,
+    df: pd.DataFrame,
+    feature_cols: list[str],   # ← теперь это уже расширенный список с interaction
+    models_dir: Path,
+    model_type: str,
+) -> None:
+    log.info("Строим SHAP explainer (model_type=%s)...", model_type)
+    log.info("SHAP будет использовать %d признаков", len(feature_cols))
+
+    if model_type == "ngboost":
+        base_learner = model.learners_[0]
+        explainer = shap.TreeExplainer(base_learner)
+    else:
+        # XGBoost: explainer строится на модели, X_sample должен
+        # иметь ровно те же колонки что видела модель при обучении
+        explainer = shap.TreeExplainer(model)
+
+    # ИСПРАВЛЕНИЕ: берём X_sample из df с interaction признаками
+    # feature_cols уже содержит расширенный список — просто фильтруем по наличию
+    available_cols = [c for c in feature_cols if c in df.columns]
+    if len(available_cols) != len(feature_cols):
+        missing = set(feature_cols) - set(available_cols)
+        log.warning("В df отсутствуют колонки для SHAP: %s", missing)
+
+    X_sample = df[df["split"] == "train"][available_cols].values[:100]
+    log.info("X_sample shape для SHAP: %s", X_sample.shape)
+
+    shap_values = explainer.shap_values(X_sample)
+    log.info("SHAP values shape: %s", np.array(shap_values).shape)
+
+    models_dir.mkdir(parents=True, exist_ok=True)
+    explainer_path = models_dir / "shap_explainer.pkl"
+
+    # Сохраняем explainer вместе со списком признаков —
+    # чтобы на инференсе знать какие колонки брать и в каком порядке
+    payload = {
+        "explainer": explainer,
+        "feature_names": available_cols,
+    }
+    with open(explainer_path, "wb") as f:
+        pickle.dump(payload, f)
+    log.info("SHAP explainer сохранён: %s (feature_names включены)", explainer_path)
+
 def get_feature_cols(df: pd.DataFrame) -> list[str]:
     """
-    Берём все признаки из FEATURE_NAMES которые есть в датасете.
-    Импорт здесь чтобы не падать если src.features недоступен при --eval-only.
+    Берём признаки в порядке SENTENCE_FEATURE_NAMES, если parquet полный;
+    иначе — только базовые из FEATURE_NAMES (interaction добавит add_interaction_features).
     """
+    if all(f in df.columns for f in SENTENCE_FEATURE_NAMES):
+        log.info("Parquet содержит полный sentence-вектор: %d признаков", len(SENTENCE_FEATURE_NAMES))
+        return list(SENTENCE_FEATURE_NAMES)
     available = [f for f in FEATURE_NAMES if f in df.columns]
-    missing   = [f for f in FEATURE_NAMES if f not in df.columns]
+    missing = [f for f in FEATURE_NAMES if f not in df.columns]
     if missing:
         log.warning(
             "Отсутствуют признаки в датасете: %s\n"
             "Убедись что extract_features.py был запущен без --only и без флагов.",
             missing,
         )
-    log.info("Признаков для обучения: %d / %d", len(available), len(FEATURE_NAMES))
+    log.info("Признаков (база): %d / %d; interaction будут добавлены в RAM", len(available), len(FEATURE_NAMES))
     return available
 
 
@@ -104,6 +173,10 @@ def load_data(processed_dir: Path) -> tuple[pd.DataFrame, list[str]]:
     log.info("Доля score_norm < 0.5: %.1f%%", (y < 0.5).mean() * 100)
 
     feature_cols = get_feature_cols(df)
+    # feature_cols = [
+    #     f for f in feature_cols
+    #     if f != "embedding_distance"
+    # ]
     return df, feature_cols
 
 
@@ -183,7 +256,7 @@ class _PearsonCallback(_XGBTrainingCallback):
     Внутри after_iteration model — Booster, predict требует DMatrix.
     """
 
-    def __init__(self, X_val: np.ndarray, y_val: np.ndarray, patience: int = 50) -> None:
+    def __init__(self, X_val: np.ndarray, y_val: np.ndarray, patience: int = 150) -> None:
         super().__init__()
         self.dval      = DMatrix(X_val)
         self.y_val     = y_val
@@ -220,8 +293,29 @@ def train_xgboost(
     feature_cols: list[str],
     models_dir: Path,
     synthetic_weight: float = 0.12,
+    semantic_feature_weight: float = 1.0,
 ) -> Any:
+    
     train_df, val_df, test_df = _split_frames(df)
+
+        # Удаляем половину synthetic train-примеров
+    if "is_synthetic" in train_df.columns:
+        synthetic_df = train_df[train_df["is_synthetic"] == True]
+        real_df = train_df[train_df["is_synthetic"] != True]
+
+        synthetic_df = synthetic_df.sample(
+            frac=0.20,
+            random_state=RANDOM_SEED,
+        )
+
+        train_df = pd.concat([real_df, synthetic_df], ignore_index=True)
+
+        log.info(
+            "После downsampling synthetic: train=%d (real=%d synthetic=%d)",
+            len(train_df),
+            len(real_df),
+            len(synthetic_df),
+        )
     
     X_train = train_df[feature_cols].values
     y_train = train_df["score_norm"].values
@@ -234,33 +328,45 @@ def train_xgboost(
     train_weights = _build_train_sample_weights(
         train_df,
         synthetic_weight=synthetic_weight,
-        low_score_tau=0.25,      # только самые плохие ~30%
-        low_score_weight=1.8,
+        low_score_tau=0.15,      
+        low_score_weight=1.0,
     )
 
     dtrain = xgb.DMatrix(X_train, label=y_train, weight=train_weights)
     dval   = xgb.DMatrix(X_val, label=y_val)
 
+    if semantic_feature_weight < 1.0:
+        fw = np.ones(len(feature_cols), dtype=np.float32)
+        for i, name in enumerate(feature_cols):
+            if str(name).startswith("semantic_"):
+                fw[i] = float(semantic_feature_weight)
+        dtrain.set_info(feature_weights=fw)
+        dval.set_info(feature_weights=fw)
+        log.info(
+            "semantic_* колонки: feature_weight=%.3f (реже попадают в colsample, "
+            "слабее доминирование PCA при <1.0)",
+            semantic_feature_weight,
+        )
+
     params = {
-        "objective": "reg:squarederror",
-        "learning_rate": 0.045,
-        "max_depth": 7,
-        "min_child_weight": 3,
-        "subsample": 0.9,
-        "colsample_bytree": 0.8,
-        "reg_lambda": 0.08,
-        "reg_alpha": 0.02,
-        "max_bin": 1024,
-        "tree_method": "hist",
-        "seed": RANDOM_SEED,
-        "verbosity": 0,
+        "objective":        "reg:squarederror",
+        "learning_rate":    0.03,       # было 0.045
+        "max_depth":        5,          # было 7
+        "min_child_weight": 5,          # было 3
+        "subsample":        0.8,
+        "colsample_bytree": 0.7,
+        "reg_lambda":       1.0,        # было 0.08 — главное изменение
+        "reg_alpha":        0.05,
+        "gamma":            0.05,
+        "tree_method":      "hist",
+        "seed":             RANDOM_SEED,
     }
 
     pearson_cb = _PearsonCallback(X_val, y_val, patience=120)
 
     log.info("Запуск обучения XGBoost...")
     booster = xgb.train(
-        params, dtrain, num_boost_round=1400,
+        params, dtrain, num_boost_round=4000,
         evals=[(dtrain, "train"), (dval, "val")],
         callbacks=[pearson_cb],
         verbose_eval=100,
@@ -272,30 +378,27 @@ def train_xgboost(
 
     log.info(f"Best iter={best_iter}  val Pearson={pearson_cb.best_r:.4f}")
 
-    # === Strong Hybrid bias toward cosine ===
-    dval_pred = booster.predict(dval)
-    cos_idx = feature_cols.index("cosine_similarity")
-    cos_val = X_val[:, cos_idx].astype(np.float32)
+    # # === Strong Hybrid bias toward cosine ===
+    # dval_pred = booster.predict(dval)
+    # cos_idx = feature_cols.index("cosine_similarity")
+    # cos_val = X_val[:, cos_idx].astype(np.float32)
 
-    from scipy.optimize import minimize_scalar
-    from scipy.stats import pearsonr
+    # def objective(w):
+    #     hybrid = w * dval_pred + (1 - w) * cos_val
+    #     return -pearsonr(y_val, hybrid)[0]
 
-    def objective(w):
-        hybrid = w * dval_pred + (1 - w) * cos_val
-        return -pearsonr(y_val, hybrid)[0]
+    # res = minimize_scalar(objective, bounds=(0.45, 0.70), method='bounded')
+    # best_w_tree = float(res.x)
 
-    res = minimize_scalar(objective, bounds=(0.45, 0.70), method='bounded')
-    best_w_tree = float(res.x)
+    # log.info(f"Hybrid → w_tree={best_w_tree:.3f} | w_cos={1-best_w_tree:.3f}")
 
-    log.info(f"Hybrid → w_tree={best_w_tree:.3f} | w_cos={1-best_w_tree:.3f}")
-
-    hybrid_meta = {
-        "w_tree": best_w_tree,
-        "w_cos": 1.0 - best_w_tree,
-        "hybrid_enabled": True
-    }
-    import json
-    (models_dir / "hybrid_meta.json").write_text(json.dumps(hybrid_meta, indent=2))
+    # hybrid_meta = {
+    #     "w_tree": best_w_tree,
+    #     "w_cos": 1.0 - best_w_tree,
+    #     "hybrid_enabled": True
+    # }
+    # import json
+    # (models_dir / "hybrid_meta.json").write_text(json.dumps(hybrid_meta, indent=2))
 
     model_path = models_dir / "xgboost_sentence.model"
     booster.save_model(str(model_path))
@@ -305,114 +408,82 @@ def train_xgboost(
 
     model = XGBRegressor()
     model.load_model(str(model_path))
-    return model
+    return model, feature_cols
 
 # ---------------------------------------------------------------------------
 # NGBoost
 # ---------------------------------------------------------------------------
 
-def train_ngboost(
-    df: pd.DataFrame,
-    feature_cols: list[str],
-    models_dir: Path,
-    synthetic_weight: float,
-) -> Any:
-    train_df, val_df, test_df = _split_frames(df)
-    X_train = train_df[feature_cols].values
-    y_train = train_df["score_norm"].values
-    X_val = val_df[feature_cols].values
-    y_val = val_df["score_norm"].values
-    X_test = test_df[feature_cols].values
-    y_test = test_df["score_norm"].values
+# def train_ngboost(
+#     df: pd.DataFrame,
+#     feature_cols: list[str],
+#     models_dir: Path,
+#     synthetic_weight: float,
+# ) -> Any:
+#     train_df, val_df, test_df = _split_frames(df)
+#     X_train = train_df[feature_cols].values
+#     y_train = train_df["score_norm"].values
+#     X_val = val_df[feature_cols].values
+#     y_val = val_df["score_norm"].values
+#     X_test = test_df[feature_cols].values
+#     y_test = test_df["score_norm"].values
 
-    # Beta требует строго (0, 1): клиппинг с запасом
-    y_train = y_train.clip(BETA_EPS, 1 - BETA_EPS)
-    y_val   = y_val.clip(BETA_EPS, 1 - BETA_EPS)
-    y_test  = y_test.clip(BETA_EPS, 1 - BETA_EPS)
+#     # Beta требует строго (0, 1): клиппинг с запасом
+#     y_train = y_train.clip(BETA_EPS, 1 - BETA_EPS)
+#     y_val   = y_val.clip(BETA_EPS, 1 - BETA_EPS)
+#     y_test  = y_test.clip(BETA_EPS, 1 - BETA_EPS)
 
-    # Asymmetric sample weights: плохие переводы важнее (из архитектуры)
-    TAU, W_HIGH, W_LOW = 0.5, 3.0, 1.0
-    sample_weight = _build_train_sample_weights(
-        train_df,
-        synthetic_weight=synthetic_weight,
-        low_score_tau=TAU,
-        low_score_weight=W_HIGH,
-    )
-    log.info(
-        "Asymmetric weights: tau=%.2f  w_high=%.1f  w_low=%.1f  "
-        "(плохих примеров: %d / %d, итоговый mean_weight=%.3f)",
-        TAU, W_HIGH, W_LOW,
-        (y_train < TAU).sum(), len(y_train),
-        float(sample_weight.mean()),
-    )
+#     # Asymmetric sample weights: плохие переводы важнее (из архитектуры)
+#     TAU, W_HIGH, W_LOW = 0.5, 3.0, 1.0
+#     sample_weight = _build_train_sample_weights(
+#         train_df,
+#         synthetic_weight=synthetic_weight,
+#         low_score_tau=TAU,
+#         low_score_weight=W_HIGH,
+#     )
+#     log.info(
+#         "Asymmetric weights: tau=%.2f  w_high=%.1f  w_low=%.1f  "
+#         "(плохих примеров: %d / %d, итоговый mean_weight=%.3f)",
+#         TAU, W_HIGH, W_LOW,
+#         (y_train < TAU).sum(), len(y_train),
+#         float(sample_weight.mean()),
+#     )
 
-    model = NGBRegressor(
-        Dist=Beta,
-        n_estimators=800,
-        learning_rate=0.05,
-        random_state=RANDOM_SEED,
-        verbose=100,
-        verbose_eval=100,
-    )
+#     model = NGBRegressor(
+#         Dist=Beta,
+#         n_estimators=800,
+#         learning_rate=0.05,
+#         random_state=RANDOM_SEED,
+#         verbose=100,
+#         verbose_eval=100,
+#     )
 
-    log.info("Обучение NGBoost (Dist=Beta, asymmetric weights)...")
-    model.fit(
-        X_train, y_train,
-        X_val=X_val, Y_val=y_val,
-        early_stopping_rounds=50,
-        sample_weight=sample_weight,
-    )
+#     log.info("Обучение NGBoost (Dist=Beta, asymmetric weights)...")
+#     model.fit(
+#         X_train, y_train,
+#         X_val=X_val, Y_val=y_val,
+#         early_stopping_rounds=50,
+#         sample_weight=sample_weight,
+#     )
 
-    # Предсказание: ожидание Beta-распределения E[q] = α/(α+β)
-    dist_test = model.pred_dist(X_test)
-    preds_test = dist_test.mean()
-    _log_metrics(y_test, preds_test, "DA test [NGBoost]")
+#     # Предсказание: ожидание Beta-распределения E[q] = α/(α+β)
+#     dist_test = model.pred_dist(X_test)
+#     preds_test = dist_test.mean()
+#     _log_metrics(y_test, preds_test, "DA test [NGBoost]")
 
-    # Дополнительно: показываем неопределённость на первых 5 примерах
-    alpha = dist_test.params["alpha"][:5]
-    beta  = dist_test.params["beta"][:5]
-    var   = (alpha * beta) / ((alpha + beta) ** 2 * (alpha + beta + 1))
-    log.info("Uncertainty (Var первых 5 примеров): %s", np.round(var, 4))
+#     # Дополнительно: показываем неопределённость на первых 5 примерах
+#     alpha = dist_test.params["alpha"][:5]
+#     beta  = dist_test.params["beta"][:5]
+#     var   = (alpha * beta) / ((alpha + beta) ** 2 * (alpha + beta + 1))
+#     log.info("Uncertainty (Var первых 5 примеров): %s", np.round(var, 4))
 
-    models_dir.mkdir(parents=True, exist_ok=True)
-    model_path = models_dir / "ngboost_sentence.pkl"
-    with open(model_path, "wb") as f:
-        pickle.dump(model, f)
-    log.info("Модель сохранена: %s", model_path)
+#     models_dir.mkdir(parents=True, exist_ok=True)
+#     model_path = models_dir / "ngboost_sentence.pkl"
+#     with open(model_path, "wb") as f:
+#         pickle.dump(model, f)
+#     log.info("Модель сохранена: %s", model_path)
 
-    return model
-
-
-# ---------------------------------------------------------------------------
-# SHAP (общий для обеих моделей — TreeExplainer работает с обеими)
-# ---------------------------------------------------------------------------
-
-def build_shap_explainer(
-    model: Any,
-    df: pd.DataFrame,
-    feature_cols: list[str],
-    models_dir: Path,
-    model_type: str,
-) -> None:
-    log.info("Строим SHAP explainer (model_type=%s)...", model_type)
-
-    if model_type == "ngboost":
-        # NGBoost: TreeExplainer строится на базовых деревьях (stage 0 = E[α])
-        # shap поддерживает NGBoost начиная с версии 0.40
-        base_learner = model.learners_[0]  # деревья для первого параметра (loc)
-        explainer = shap.TreeExplainer(base_learner)
-    else:
-        explainer = shap.TreeExplainer(model)
-
-    X_sample = df[df["split"] == "train"][feature_cols].values[:100]
-    shap_values = explainer.shap_values(X_sample)
-    log.info("SHAP values shape: %s", np.array(shap_values).shape)
-
-    models_dir.mkdir(parents=True, exist_ok=True)
-    explainer_path = models_dir / "shap_explainer.pkl"
-    with open(explainer_path, "wb") as f:
-        pickle.dump(explainer, f)
-    log.info("SHAP explainer сохранён: %s", explainer_path)
+#     return model
 
 
 # ---------------------------------------------------------------------------
@@ -437,6 +508,9 @@ def external_test(
     log.info("MQM датасет: %d строк, %d колонок", len(mqm), len(mqm.columns))
 
     missing = [f for f in feature_cols if f not in mqm.columns]
+    if missing and all(name in INTERACTION_FEATURE_NAMES for name in missing):
+        mqm = add_interaction_columns_to_dataframe(mqm)
+        missing = [f for f in feature_cols if f not in mqm.columns]
     if missing:
         log.error(
             "В hf_mqm_features.parquet отсутствуют признаки: %s",
@@ -497,8 +571,8 @@ def external_test(
 
     # Дополнительно: тест по квантилям (топ-20% vs bottom-20%)
     # Помогает понять различает ли модель явно плохие и хорошие переводы
-    threshold_lo = np.percentile(mqm_score, 20)
-    threshold_hi = np.percentile(mqm_score, 80)
+    threshold_lo = np.percentile(mqm_score, 15)
+    threshold_hi = np.percentile(mqm_score, 85)
     mask = (mqm_score <= threshold_lo) | (mqm_score >= threshold_hi)
     if mask.sum() > 100:
         rho_extreme, _ = spearmanr(mqm_score[mask], preds[mask])
@@ -561,6 +635,16 @@ def main() -> None:
             "0.1 по умолчанию: synthetic negatives помогают, но не доминируют."
         ),
     )
+    parser.add_argument(
+        "--semantic-feature-weight",
+        type=float,
+        default=1.0,
+        help=(
+            "Вес колонок semantic_* в XGBoost feature_weights (subsampling). "
+            "1.0 = как раньше. Попробуй 0.25–0.45, чтобы PCA меньше перетягивал "
+            "деревья и SHAP был читабельнее (часто немного падает Pearson)."
+        ),
+    )
     args = parser.parse_args()
 
     processed_dir = args.data_dir / "processed"
@@ -569,25 +653,29 @@ def main() -> None:
     if args.eval_only:
         model = _load_model_for_eval(args.model, args.models_dir)
         df, feature_cols = load_data(processed_dir)
+        df, feature_cols = add_interaction_features(df, feature_cols)
         external_test(model, processed_dir, feature_cols, args.model)
         return
 
     df, feature_cols = load_data(processed_dir)
+    df, feature_cols = add_interaction_features(df, feature_cols)
+    log.info("Итого признаков после interaction: %d", len(feature_cols))
 
     if args.model == "xgboost":
-        model = train_xgboost(
+        model, feature_cols = train_xgboost(
             df,
             feature_cols,
             args.models_dir,
             synthetic_weight=args.synthetic_weight,
+            semantic_feature_weight=args.semantic_feature_weight,
         )
-    else:
-        model = train_ngboost(
-            df,
-            feature_cols,
-            args.models_dir,
-            synthetic_weight=args.synthetic_weight,
-        )
+    # else:
+    #     model = train_ngboost(
+    #         df,
+    #         feature_cols,
+    #         args.models_dir,
+    #         synthetic_weight=args.synthetic_weight,
+    #     )
 
     build_shap_explainer(model, df, feature_cols, args.models_dir, args.model)
     external_test(model, processed_dir, feature_cols, args.model)

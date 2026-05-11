@@ -2,8 +2,9 @@
 Инференс-обёртка над обученной sentence-level моделью (XGBoost или NGBoost).
 
 Поддерживает:
-  - новые 86-мерные модели (22 classic + 64 semantic PCA)
-  - старые 22-мерные артефакты для обратной совместимости
+  - sentence-вектор с semantic PCA (база 86 + interaction, см. schema.SENTENCE_FEATURE_NAMES)
+  - классику без PCA (22 + interaction)
+  - старые 22-мерные / 16 light артефакты для обратной совместимости
 """
 
 from __future__ import annotations
@@ -22,6 +23,8 @@ from src.features.schema import (
     FEATURE_NAMES_CLASSIC as LEGACY_FEATURE_NAMES,
     FEATURE_NAMES_LIGHT,
     SEMANTIC_FEATURE_NAMES,
+    SENTENCE_FEATURE_NAMES,
+    SENTENCE_FEATURE_NAMES_CLASSIC,
 )
 
 try:
@@ -58,6 +61,22 @@ FEATURE_TO_MQM: Dict[str, str | None] = {
     "min_token_log_prob": "Fluency",
 }
 FEATURE_TO_MQM.update({name: "Semantic" for name in SEMANTIC_FEATURE_NAMES})
+FEATURE_TO_MQM.update(
+    {
+        "cosine_x_length_ok": "Accuracy",
+        "log_perplexity": "Fluency",
+        "cosine_per_logppl": "Accuracy",
+        "entity_x_cosine": "Terminology",
+        "oov_x_bad_cosine": "Fluency",
+        "logprob_spike": "Fluency",
+        "variance_x_bad_cosine": "Fluency",
+        "normed_length_diff": "Accuracy",
+        "digit_x_entity": "Locale",
+        "formal_x_cosine": "Style",
+        "dist_x_logppl": "Accuracy",
+        "xgb_score": "EnsembleBase",
+    }
+)
 
 MQM_CATEGORY_RU: Dict[str, str] = {
     "Accuracy": "Точность (смысл)",
@@ -66,6 +85,8 @@ MQM_CATEGORY_RU: Dict[str, str] = {
     "Locale": "Локаль/форматирование",
     "Style": "Стиль/регистр",
     "Semantic": "Семантическая согласованность",
+    "EnsembleBase": "База градиентного бустинга",
+    "Other": "Прочее",
 }
 
 
@@ -93,16 +114,24 @@ class SentenceModel:
         if not explainer_path.exists():
             raise FileNotFoundError(f"SHAP explainer не найден: {explainer_path}")
 
+        self._explainer_feature_names: list[str] | None = None
         try:
             with open(explainer_path, "rb") as f:
-                self._explainer = pickle.load(f)
+                loaded_expl = pickle.load(f)
         except ModuleNotFoundError as exc:
             log.warning(
                 "Не удалось загрузить SHAP explainer (%s). "
                 "Продолжаем без SHAP: значения будут нулевыми.",
                 exc,
             )
-            self._explainer = None
+            loaded_expl = None
+
+        if isinstance(loaded_expl, dict) and "explainer" in loaded_expl:
+            self._explainer = loaded_expl["explainer"]
+            fn = loaded_expl.get("feature_names")
+            self._explainer_feature_names = list(fn) if fn else None
+        else:
+            self._explainer = loaded_expl
 
         if model_path.suffix == ".model":
             if xgb is None:
@@ -119,7 +148,13 @@ class SentenceModel:
             log.info("Загружена модель типа %s из %s", self._model_type, model_path)
 
         self._expected_feature_count = self._infer_feature_count()
-        self._feature_names = _infer_feature_names(self._expected_feature_count)
+        if (
+            self._explainer_feature_names is not None
+            and len(self._explainer_feature_names) == self._expected_feature_count
+        ):
+            self._feature_names = list(self._explainer_feature_names)
+        else:
+            self._feature_names = _infer_feature_names(self._expected_feature_count)
         log.info(
             "SentenceModel ожидает %d признаков",
             self._expected_feature_count,
@@ -156,6 +191,9 @@ class SentenceModel:
             value = getattr(self._model, attr_name, None)
             if value is not None:
                 return int(value)
+
+        if self._explainer_feature_names is not None:
+            return len(self._explainer_feature_names)
 
         feature_names = getattr(self._explainer, "feature_names", None)
         if feature_names:
@@ -254,6 +292,10 @@ class SentenceModel:
 
 
 def _infer_feature_names(count: int) -> list[str]:
+    if count == len(SENTENCE_FEATURE_NAMES):
+        return list(SENTENCE_FEATURE_NAMES)
+    if count == len(SENTENCE_FEATURE_NAMES_CLASSIC):
+        return list(SENTENCE_FEATURE_NAMES_CLASSIC)
     if count == len(FULL_FEATURE_NAMES):
         return list(FULL_FEATURE_NAMES)
     if count == len(LEGACY_FEATURE_NAMES):

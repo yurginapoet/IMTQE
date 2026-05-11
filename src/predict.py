@@ -28,8 +28,9 @@ src/predict.py
 from __future__ import annotations
 
 import logging
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, is_dataclass, replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Mapping, Sequence
 
 import numpy as np
@@ -38,6 +39,8 @@ from src.features.extractor import FeatureExtractor
 from src.features.schema import FEATURE_NAMES_CLASSIC, FEATURE_NAMES_LIGHT
 from src.interpretation.overall import OverallSentenceEvaluator, OverallSentenceResult
 from src.interpretation.rules import describe_error_type_ru
+from src.interpretation.explanation_loss import shap_categories_to_loss_shares
+from src.models.neural_head import FeatureAttentionHead
 from src.models.sentence_model import SentenceModel, MQM_CATEGORY_RU
 from src.models.span_model import SpanModel
 
@@ -108,6 +111,7 @@ class Predictor:
         device: str = "cpu",
     ) -> None:
         models_dir = Path(models_dir)
+        self._models_dir = models_dir
 
         # Автовыбор модели предложения: XGBoost приоритетнее NGBoost
         if sentence_model_path is None:
@@ -141,6 +145,22 @@ class Predictor:
 
         log.info("Инициализация OverallSentenceEvaluator...")
         self.overall = OverallSentenceEvaluator(weights_path=mqm_weights_path)
+
+        self._neural_head: FeatureAttentionHead | None = None
+        self._neural_feature_names: list[str] | None = None
+        if getattr(self.sentence_model, "_model_type", "") == "xgboost":
+            try:
+                self._neural_head, self._neural_feature_names = FeatureAttentionHead.load(
+                    models_dir
+                )
+                log.info(
+                    "Загружена нейронная голова для объяснений (%d входов)",
+                    len(self._neural_feature_names or ()),
+                )
+            except FileNotFoundError:
+                log.info(
+                    "models/neural_head.pt не найден — категории «потерь» считаются из SHAP"
+                )
 
         log.info("Predictor готов.")
 
@@ -185,6 +205,10 @@ class Predictor:
             span_pred=span_pred,
             mt_words=mt_words,
             sentence_features=feats.get("raw", {}),
+        )
+        overall = _with_loss_explanation(
+            overall,
+            self._display_explanation_en(feats, sentence_pred),
         )
 
         # Собираем debug-информацию: признаки, word_logprobs, SHAP values
@@ -244,6 +268,10 @@ class Predictor:
                 mt_words=mt_words,
                 sentence_features=feats.get("raw", {}),
             )
+            overall = _with_loss_explanation(
+                overall,
+                self._display_explanation_en(feats, sentence_pred),
+            )
 
             # Собираем debug для текущего предложения
             debug_info = {
@@ -278,6 +306,56 @@ class Predictor:
             device=self._device
         )
         log.info("SentenceModel и SpanModel успешно перезагружены.")
+        self._neural_head = None
+        self._neural_feature_names = None
+        if getattr(self.sentence_model, "_model_type", "") == "xgboost":
+            try:
+                self._neural_head, self._neural_feature_names = FeatureAttentionHead.load(
+                    self._models_dir
+                )
+            except FileNotFoundError:
+                pass
+
+    def _build_neural_input(
+        self,
+        feats: dict[str, Any],
+        sentence_pred: Any,
+    ) -> np.ndarray | None:
+        if self._neural_head is None or not self._neural_feature_names:
+            return None
+        sm_names = self.sentence_model.feature_names
+        raw_vec = np.asarray(feats["vector"], dtype=np.float32).reshape(-1)
+        if len(raw_vec) != len(sm_names):
+            return None
+        idx = {n: i for i, n in enumerate(sm_names)}
+        cols: list[float] = []
+        for fn in self._neural_feature_names[:-1]:
+            if fn not in idx:
+                log.warning("neural_head: признак %s отсутствует в векторе", fn)
+                return None
+            cols.append(float(raw_vec[idx[fn]]))
+        if self._neural_feature_names[-1] != "xgb_score":
+            log.warning("neural_head: ожидалась последняя колонка xgb_score")
+            return None
+        cols.append(float(np.clip(sentence_pred.score, 0.0, 1.0)))
+        return np.array(cols, dtype=np.float32)
+
+    def _display_explanation_en(self, feats: dict[str, Any], sentence_pred: Any) -> dict[str, float]:
+        """
+        Доли «потери» по MQM-категориям (англ. ключи), сумма ≈ 1 после фильтра <0.5%.
+        При наличии neural_head — распределение (1 − score_head) по attention; иначе SHAP.
+        """
+        x = self._build_neural_input(feats, sentence_pred)
+        if x is not None and self._neural_head is not None and self._neural_feature_names:
+            return self._neural_head.explain_mqm_loss_shares(
+                x,
+                self._neural_feature_names,
+                min_category_share=0.005,
+            )
+        return shap_categories_to_loss_shares(
+            sentence_pred.explanation,
+            min_share=0.005,
+        )
 
     def _validate_extractor_features(self, expected_feature_count: int) -> None:
         active_feature_count = len(self.extractor.active_feature_names)
@@ -302,6 +380,16 @@ class Predictor:
 # ---------------------------------------------------------------------------
 # Вспомогательные функции
 # ---------------------------------------------------------------------------
+
+def _with_loss_explanation(
+    overall: OverallSentenceResult | Any,
+    loss_shares_en: dict[str, float],
+) -> OverallSentenceResult | Any:
+    """Подменяет explanation на доли потери (англ. ключи MQM), сумма ≈ 1."""
+    if is_dataclass(overall) and not isinstance(overall, type):
+        return replace(overall, explanation=loss_shares_en)
+    return SimpleNamespace(**{**vars(overall), "explanation": loss_shares_en})
+
 
 def _get_mt_words(feats: dict[str, Any], mt_fallback: str) -> list[str]:
     """

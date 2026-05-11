@@ -21,3 +21,24 @@ SEMANTIC_FEATURE_NAMES = [
 ]
 
 FEATURE_NAMES = FEATURE_NAMES_CLASSIC + SEMANTIC_FEATURE_NAMES
+
+# Производные признаки (тот же порядок, что в add_interaction_features / FeatureExtractor).
+INTERACTION_FEATURE_NAMES = [
+    "cosine_x_length_ok",
+    "log_perplexity",
+    "cosine_per_logppl",
+    "entity_x_cosine",
+    "oov_x_bad_cosine",
+    "logprob_spike",
+    "variance_x_bad_cosine",
+    "normed_length_diff",
+    "digit_x_entity",
+    "formal_x_cosine",
+    "dist_x_logppl",
+]
+
+# Полный вектор sentence-модели: базовые 86 + 11 interaction = 97.
+SENTENCE_FEATURE_NAMES = FEATURE_NAMES + INTERACTION_FEATURE_NAMES
+
+# Классический тяжёлый режим без semantic PCA: 22 + 11 = 33.
+SENTENCE_FEATURE_NAMES_CLASSIC = FEATURE_NAMES_CLASSIC + INTERACTION_FEATURE_NAMES
