@@ -140,36 +140,30 @@ def _build_train_sample_weights(
 ) -> np.ndarray:
     """
     Веса для train-set.
-
-    Synthetic negatives полезны как регуляризация, но их эвристические target-ы
-    не должны полностью переписывать распределение реальных DA оценок.
-    Поэтому по умолчанию их вклад уменьшаем.
     """
     weights = np.ones(len(train_df), dtype=np.float32)
 
+    # Synthetic negatives — снижаем их влияние
     if "is_synthetic" in train_df.columns:
         synthetic_mask = train_df["is_synthetic"].fillna(False).to_numpy(dtype=bool)
         synthetic_count = int(synthetic_mask.sum())
         if synthetic_count:
             weights[synthetic_mask] *= float(synthetic_weight)
-            effective_synth_share = weights[synthetic_mask].sum() / max(weights.sum(), 1e-8)
+            effective_share = weights[synthetic_mask].sum() / max(weights.sum(), 1e-8)
             log.info(
-                "Synthetic train rows: %d / %d  synthetic_weight=%.3f  effective_weight_share=%.1f%%",
-                synthetic_count,
-                len(train_df),
-                synthetic_weight,
-                effective_synth_share * 100.0,
+                "Synthetic train rows: %d / %d  weight=%.3f  effective_share=%.1f%%",
+                synthetic_count, len(train_df), synthetic_weight, effective_share * 100
             )
 
-    if low_score_tau is not None and low_score_weight != 1.0:
+    # Low-score upweighting — делаем более targeted
+    if low_score_tau is not None and low_score_weight > 1.0:
         low_score_mask = train_df["score_norm"].to_numpy() < float(low_score_tau)
+        affected = int(low_score_mask.sum())
         weights[low_score_mask] *= float(low_score_weight)
+        
         log.info(
-            "Low-score upweighting: tau=%.2f  low_score_weight=%.2f  affected=%d / %d",
-            low_score_tau,
-            low_score_weight,
-            int(low_score_mask.sum()),
-            len(train_df),
+            "Low-score upweighting: tau=%.2f  weight=%.2f  affected=%d / %d (%.1f%%)",
+            low_score_tau, low_score_weight, affected, len(train_df), 100 * affected / len(train_df)
         )
 
     return weights
@@ -225,9 +219,10 @@ def train_xgboost(
     df: pd.DataFrame,
     feature_cols: list[str],
     models_dir: Path,
-    synthetic_weight: float,
+    synthetic_weight: float = 0.12,
 ) -> Any:
     train_df, val_df, test_df = _split_frames(df)
+    
     X_train = train_df[feature_cols].values
     y_train = train_df["score_norm"].values
     X_val = val_df[feature_cols].values
@@ -235,63 +230,81 @@ def train_xgboost(
     X_test = test_df[feature_cols].values
     y_test = test_df["score_norm"].values
 
+    # Очень мягкий upweighting
     train_weights = _build_train_sample_weights(
         train_df,
         synthetic_weight=synthetic_weight,
+        low_score_tau=0.25,      # только самые плохие ~30%
+        low_score_weight=1.8,
     )
 
     dtrain = xgb.DMatrix(X_train, label=y_train, weight=train_weights)
-    dval   = xgb.DMatrix(X_val,   label=y_val)
+    dval   = xgb.DMatrix(X_val, label=y_val)
 
     params = {
         "objective": "reg:squarederror",
-        "learning_rate": 0.03,
-        "max_depth": 6,
-        "subsample": 0.8,
+        "learning_rate": 0.045,
+        "max_depth": 7,
+        "min_child_weight": 3,
+        "subsample": 0.9,
         "colsample_bytree": 0.8,
+        "reg_lambda": 0.08,
+        "reg_alpha": 0.02,
+        "max_bin": 1024,
         "tree_method": "hist",
-        "max_bin": 256,
         "seed": RANDOM_SEED,
         "verbosity": 0,
     }
 
-    evals = [(dtrain, "train"), (dval, "val")]
-    pearson_cb = _PearsonCallback(X_val, y_val, patience=50)
+    pearson_cb = _PearsonCallback(X_val, y_val, patience=120)
 
-    log.info("Обучение XGBoost (early stopping по val pearson)...")
+    log.info("Запуск обучения XGBoost...")
     booster = xgb.train(
-        params,
-        dtrain,
-        num_boost_round=800,
-        evals=evals,
+        params, dtrain, num_boost_round=1400,
+        evals=[(dtrain, "train"), (dval, "val")],
         callbacks=[pearson_cb],
         verbose_eval=100,
     )
+
     best_iter = pearson_cb.best_iter
     if best_iter + 1 < booster.num_boosted_rounds():
-        booster = booster[: best_iter + 1]
-    booster.set_attr(best_iteration=str(best_iter), best_pearson=str(pearson_cb.best_r))
-    log.info(
-        "Лучший XGBoost iter=%d  val Pearson=%.4f  trees_saved=%d",
-        best_iter,
-        pearson_cb.best_r,
-        booster.num_boosted_rounds(),
-    )
+        booster = booster[:best_iter + 1]
 
-    # Сохраняем бустер
-    models_dir.mkdir(parents=True, exist_ok=True)
+    log.info(f"Best iter={best_iter}  val Pearson={pearson_cb.best_r:.4f}")
+
+    # === Strong Hybrid bias toward cosine ===
+    dval_pred = booster.predict(dval)
+    cos_idx = feature_cols.index("cosine_similarity")
+    cos_val = X_val[:, cos_idx].astype(np.float32)
+
+    from scipy.optimize import minimize_scalar
+    from scipy.stats import pearsonr
+
+    def objective(w):
+        hybrid = w * dval_pred + (1 - w) * cos_val
+        return -pearsonr(y_val, hybrid)[0]
+
+    res = minimize_scalar(objective, bounds=(0.45, 0.70), method='bounded')
+    best_w_tree = float(res.x)
+
+    log.info(f"Hybrid → w_tree={best_w_tree:.3f} | w_cos={1-best_w_tree:.3f}")
+
+    hybrid_meta = {
+        "w_tree": best_w_tree,
+        "w_cos": 1.0 - best_w_tree,
+        "hybrid_enabled": True
+    }
+    import json
+    (models_dir / "hybrid_meta.json").write_text(json.dumps(hybrid_meta, indent=2))
+
     model_path = models_dir / "xgboost_sentence.model"
     booster.save_model(str(model_path))
-    log.info("Модель сохранена: %s", model_path)
+
+    dtest = xgb.DMatrix(X_test)
+    _log_metrics(y_test, booster.predict(dtest), "DA test")
 
     model = XGBRegressor()
     model.load_model(str(model_path))
-
-    # Предсказание на тесте
-    dtest = xgb.DMatrix(X_test)
-    preds_test = booster.predict(dtest)
-    _log_metrics(y_test, preds_test, "DA test [XGBoost]")
-
     return model
 
 # ---------------------------------------------------------------------------
