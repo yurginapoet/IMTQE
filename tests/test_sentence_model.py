@@ -9,12 +9,15 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.models.sentence_model import (
     FEATURE_NAMES,
     FEATURE_TO_MQM,
+    LEGACY_FEATURE_NAMES,
+    MQM_CATEGORY_RU,
     SentenceModel,
     SentencePrediction,
     _aggregate_shap,
@@ -25,7 +28,7 @@ from src.models.sentence_model import (
 XGBOOST_PATH = Path("models/xgboost_sentence.model")   # изменено с .pkl на .model
 EXPLAINER_PATH = Path("models/shap_explainer.pkl")
 
-DUMMY_FEATURES = np.array([
+DUMMY_LEGACY_FEATURES = np.array([
     1.05, 1.0, 1.0, 12.0, 13.0,
     1.0, 0.95, 0.0, 0.0,
     0.02, 0.65, 5.5, 0.9, 0.0, 4.0, 0.3,
@@ -33,7 +36,17 @@ DUMMY_FEATURES = np.array([
     45.0, -3.8, 0.5, -6.2,
 ], dtype=np.float32)
 
-assert len(DUMMY_FEATURES) == 22
+assert len(DUMMY_LEGACY_FEATURES) == len(LEGACY_FEATURE_NAMES)
+
+
+def _features_for_model(model: SentenceModel, base: np.ndarray) -> np.ndarray:
+    if model.expected_feature_count == len(base):
+        return base
+    if model.expected_feature_count > len(base):
+        padded = np.zeros(model.expected_feature_count, dtype=np.float32)
+        padded[: len(base)] = base
+        return padded
+    return base[: model.expected_feature_count]
 
 
 # ---------------------------------------------------------------------------
@@ -41,14 +54,16 @@ assert len(DUMMY_FEATURES) == 22
 # ---------------------------------------------------------------------------
 
 def test_feature_names_length():
-    assert len(FEATURE_NAMES) == 22
-    print("OK  FEATURE_NAMES: 22 признака")
+    assert len(FEATURE_NAMES) == 86
+    assert len(LEGACY_FEATURE_NAMES) == 22
+    print("OK  FEATURE_NAMES: 86 признаков, LEGACY_FEATURE_NAMES: 22 признака")
 
 
 def test_feature_to_mqm_coverage():
     for name in FEATURE_NAMES:
         assert name in FEATURE_TO_MQM, f"Признак '{name}' отсутствует в FEATURE_TO_MQM"
-    print("OK  FEATURE_TO_MQM: все 22 признака покрыты")
+    assert "Semantic" in MQM_CATEGORY_RU
+    print("OK  FEATURE_TO_MQM: все 86 признаков покрыты")
 
 
 def test_beta_stats_basic():
@@ -68,9 +83,9 @@ def test_xgboost_uncertainty_bounds():
 
 
 def test_aggregate_shap_categories():
-    agg = _aggregate_shap(np.ones(22, dtype=np.float32))
-    assert set(agg.keys()) == {"Accuracy", "Fluency", "Terminology", "Locale", "Style"}
-    assert abs(sum(agg.values()) - 20.0) < 1e-5
+    agg = _aggregate_shap(np.ones(len(FEATURE_NAMES), dtype=np.float32), FEATURE_NAMES)
+    assert set(agg.keys()) == {"Accuracy", "Fluency", "Terminology", "Locale", "Style", "Semantic"}
+    assert abs(sum(agg.values()) - 84.0) < 1e-5
     print(f"OK  _aggregate_shap: {list(agg.keys())} сумма={sum(agg.values()):.1f}")
 
 
@@ -79,8 +94,11 @@ def test_aggregate_shap_categories():
 # ---------------------------------------------------------------------------
 
 def test_xgboost_predict():
-    model = SentenceModel(XGBOOST_PATH, EXPLAINER_PATH)
-    pred = model.predict(DUMMY_FEATURES)
+    try:
+        model = SentenceModel(XGBOOST_PATH, EXPLAINER_PATH)
+    except (ImportError, FileNotFoundError) as exc:
+        pytest.skip(f"Интеграционный тест пропущен: {exc}")
+    pred = model.predict(_features_for_model(model, DUMMY_LEGACY_FEATURES))
 
     assert isinstance(pred, SentencePrediction)
     assert 0.0 <= pred.score <= 1.0, f"score вне [0,1]: {pred.score}"
@@ -88,7 +106,7 @@ def test_xgboost_predict():
     assert 0.0 <= pred.ci_low <= pred.ci_high <= 1.0
     assert pred.alpha is None
     assert pred.beta_param is None
-    assert len(pred.shap_values) == 22
+    assert len(pred.shap_values) == model.expected_feature_count
     assert len(pred.explanation) > 0
 
     print(f"OK  XGBoost predict:")
@@ -97,14 +115,24 @@ def test_xgboost_predict():
 
 
 def test_xgboost_predict_batch():
-    model = SentenceModel(XGBOOST_PATH, EXPLAINER_PATH)
+    try:
+        model = SentenceModel(XGBOOST_PATH, EXPLAINER_PATH)
+    except (ImportError, FileNotFoundError) as exc:
+        pytest.skip(f"Интеграционный тест пропущен: {exc}")
 
-    bad = DUMMY_FEATURES.copy()
+    bad = DUMMY_LEGACY_FEATURES.copy()
     bad[16] = 0.3    # cosine_similarity низкое
     bad[0]  = 0.4    # length_ratio — omission
     bad[18] = 150.0  # perplexity высокое
 
-    preds = model.predict_batch(np.stack([DUMMY_FEATURES, bad]))
+    preds = model.predict_batch(
+        np.stack(
+            [
+                _features_for_model(model, DUMMY_LEGACY_FEATURES),
+                _features_for_model(model, bad),
+            ]
+        )
+    )
 
     assert len(preds) == 2
     assert preds[0].score > preds[1].score, (

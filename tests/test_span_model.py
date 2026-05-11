@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -19,6 +20,7 @@ from src.models.span_model import (
     SpanModel,
     SpanPrediction,
     SpanResult,
+    _build_word_spans,
     _map_subtokens_to_words,
 )
 
@@ -86,6 +88,23 @@ def test_map_subtokens_two_words():
     print("✓ _map_subtokens: два слова, второе multi-subtoken")
 
 
+def test_map_subtokens_with_explicit_mt_words():
+    """Явные mt_words позволяют держать токенизацию согласованной с extractor/UI."""
+    mt_text = "Привет, мир!"
+    offsets = [(0, 6), (6, 7), (8, 11), (11, 12)]
+    mt_words = ["Привет", ",", "мир", "!"]
+    result = _map_subtokens_to_words(mt_text, offsets, len(mt_words), mt_words=mt_words)
+    assert result == [0, 1, 2, 3], f"Ожидается [0,1,2,3], получено {result}"
+    print("✓ _map_subtokens: explicit mt_words поддерживаются")
+
+
+def test_build_word_spans_with_punctuation_tokens():
+    mt_text = "Привет, мир!"
+    spans = _build_word_spans(mt_text, ["Привет", ",", "мир", "!"])
+    assert spans == [(0, 6), (6, 7), (8, 11), (11, 12)]
+    print("✓ _build_word_spans: punctuation-aware токены корректно маппятся")
+
+
 # ---------------------------------------------------------------------------
 # Интеграционные тесты — загрузка реальной модели
 # ---------------------------------------------------------------------------
@@ -94,7 +113,12 @@ def _load_model() -> SpanModel | None:
     if not MODEL_DIR.exists():
         print(f"⚠ Пропуск: {MODEL_DIR} не найден")
         return None
-    return SpanModel(MODEL_DIR, device="cpu")
+    try:
+        return SpanModel(MODEL_DIR, device="cpu")
+    except FileNotFoundError as exc:
+        pytest.skip(f"Span-модель недоступна для интеграционного теста: {exc}")
+    except OSError as exc:
+        pytest.skip(f"Span-модель не может быть загружена локально: {exc}")
 
 
 def test_span_model_loads():
@@ -237,6 +261,8 @@ if __name__ == "__main__":
     test_map_subtokens_multi()
     test_map_subtokens_empty_offset()
     test_map_subtokens_two_words()
+    test_map_subtokens_with_explicit_mt_words()
+    test_build_word_spans_with_punctuation_tokens()
 
     print()
     print("=" * 60)
