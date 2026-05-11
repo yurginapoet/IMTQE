@@ -60,6 +60,7 @@ log = logging.getLogger(__name__)
 RANDOM_SEED = 42
 # NGBoost: Beta требует строго (0, 1), не включая границы
 BETA_EPS = 1e-4
+DEFAULT_SYNTHETIC_WEIGHT = 0.10
 
 
 # ---------------------------------------------------------------------------
@@ -106,15 +107,20 @@ def load_data(processed_dir: Path) -> tuple[pd.DataFrame, list[str]]:
     return df, feature_cols
 
 
+def _split_frames(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    train_df = df[df["split"] == "train"].copy()
+    val_df = df[df["split"] == "val"].copy()
+    test_df = df[df["split"] == "test"].copy()
+    log.info("train=%d  val=%d  test=%d", len(train_df), len(val_df), len(test_df))
+    return train_df, val_df, test_df
+
+
 def _split_arrays(
     df: pd.DataFrame,
     feature_cols: list[str],
 ) -> tuple[np.ndarray, ...]:
     """Возвращает X_train, y_train, X_val, y_val, X_test, y_test."""
-    train_df = df[df["split"] == "train"]
-    val_df   = df[df["split"] == "val"]
-    test_df  = df[df["split"] == "test"]
-    log.info("train=%d  val=%d  test=%d", len(train_df), len(val_df), len(test_df))
+    train_df, val_df, test_df = _split_frames(df)
 
     return (
         train_df[feature_cols].values,
@@ -124,6 +130,49 @@ def _split_arrays(
         test_df[feature_cols].values,
         test_df["score_norm"].values,
     )
+
+
+def _build_train_sample_weights(
+    train_df: pd.DataFrame,
+    synthetic_weight: float = 1.0,
+    low_score_tau: float | None = None,
+    low_score_weight: float = 1.0,
+) -> np.ndarray:
+    """
+    Веса для train-set.
+
+    Synthetic negatives полезны как регуляризация, но их эвристические target-ы
+    не должны полностью переписывать распределение реальных DA оценок.
+    Поэтому по умолчанию их вклад уменьшаем.
+    """
+    weights = np.ones(len(train_df), dtype=np.float32)
+
+    if "is_synthetic" in train_df.columns:
+        synthetic_mask = train_df["is_synthetic"].fillna(False).to_numpy(dtype=bool)
+        synthetic_count = int(synthetic_mask.sum())
+        if synthetic_count:
+            weights[synthetic_mask] *= float(synthetic_weight)
+            effective_synth_share = weights[synthetic_mask].sum() / max(weights.sum(), 1e-8)
+            log.info(
+                "Synthetic train rows: %d / %d  synthetic_weight=%.3f  effective_weight_share=%.1f%%",
+                synthetic_count,
+                len(train_df),
+                synthetic_weight,
+                effective_synth_share * 100.0,
+            )
+
+    if low_score_tau is not None and low_score_weight != 1.0:
+        low_score_mask = train_df["score_norm"].to_numpy() < float(low_score_tau)
+        weights[low_score_mask] *= float(low_score_weight)
+        log.info(
+            "Low-score upweighting: tau=%.2f  low_score_weight=%.2f  affected=%d / %d",
+            low_score_tau,
+            low_score_weight,
+            int(low_score_mask.sum()),
+            len(train_df),
+        )
+
+    return weights
 
 
 def _log_metrics(y_true: np.ndarray, preds: np.ndarray, label: str) -> None:
@@ -176,19 +225,23 @@ def train_xgboost(
     df: pd.DataFrame,
     feature_cols: list[str],
     models_dir: Path,
+    synthetic_weight: float,
 ) -> Any:
+    train_df, val_df, test_df = _split_frames(df)
+    X_train = train_df[feature_cols].values
+    y_train = train_df["score_norm"].values
+    X_val = val_df[feature_cols].values
+    y_val = val_df["score_norm"].values
+    X_test = test_df[feature_cols].values
+    y_test = test_df["score_norm"].values
 
+    train_weights = _build_train_sample_weights(
+        train_df,
+        synthetic_weight=synthetic_weight,
+    )
 
-    X_train, y_train, X_val, y_val, X_test, y_test = _split_arrays(df, feature_cols)
-
-    dtrain = xgb.DMatrix(X_train, label=y_train)
+    dtrain = xgb.DMatrix(X_train, label=y_train, weight=train_weights)
     dval   = xgb.DMatrix(X_val,   label=y_val)
-
-    # Кастомная метрика Pearson для early stopping
-    def pearson_eval(preds, dmatrix):
-        labels = dmatrix.get_label()
-        r, _ = pearsonr(labels, preds)
-        return 'pearson', -r  # минус, т.к. xgb минимизирует
 
     params = {
         "objective": "reg:squarederror",
@@ -196,27 +249,40 @@ def train_xgboost(
         "max_depth": 6,
         "subsample": 0.8,
         "colsample_bytree": 0.8,
+        "tree_method": "hist",
+        "max_bin": 256,
         "seed": RANDOM_SEED,
         "verbosity": 0,
     }
 
     evals = [(dtrain, "train"), (dval, "val")]
+    pearson_cb = _PearsonCallback(X_val, y_val, patience=50)
 
     log.info("Обучение XGBoost (early stopping по val pearson)...")
     booster = xgb.train(
         params,
         dtrain,
-        num_boost_round=500,
+        num_boost_round=800,
         evals=evals,
-        early_stopping_rounds=50,
-        feval=pearson_eval,
+        callbacks=[pearson_cb],
         verbose_eval=100,
     )
+    best_iter = pearson_cb.best_iter
+    if best_iter + 1 < booster.num_boosted_rounds():
+        booster = booster[: best_iter + 1]
+    booster.set_attr(best_iteration=str(best_iter), best_pearson=str(pearson_cb.best_r))
+    log.info(
+        "Лучший XGBoost iter=%d  val Pearson=%.4f  trees_saved=%d",
+        best_iter,
+        pearson_cb.best_r,
+        booster.num_boosted_rounds(),
+    )
 
-    # Сохраняем бустер (не содержит ссылок на DMatrix)
+    # Сохраняем бустер
+    models_dir.mkdir(parents=True, exist_ok=True)
     model_path = models_dir / "xgboost_sentence.model"
     booster.save_model(str(model_path))
-    log.info("Модель сохранена в формате .model: %s", model_path)
+    log.info("Модель сохранена: %s", model_path)
 
     model = XGBRegressor()
     model.load_model(str(model_path))
@@ -228,7 +294,6 @@ def train_xgboost(
 
     return model
 
-
 # ---------------------------------------------------------------------------
 # NGBoost
 # ---------------------------------------------------------------------------
@@ -237,10 +302,15 @@ def train_ngboost(
     df: pd.DataFrame,
     feature_cols: list[str],
     models_dir: Path,
+    synthetic_weight: float,
 ) -> Any:
-
-
-    X_train, y_train, X_val, y_val, X_test, y_test = _split_arrays(df, feature_cols)
+    train_df, val_df, test_df = _split_frames(df)
+    X_train = train_df[feature_cols].values
+    y_train = train_df["score_norm"].values
+    X_val = val_df[feature_cols].values
+    y_val = val_df["score_norm"].values
+    X_test = test_df[feature_cols].values
+    y_test = test_df["score_norm"].values
 
     # Beta требует строго (0, 1): клиппинг с запасом
     y_train = y_train.clip(BETA_EPS, 1 - BETA_EPS)
@@ -249,12 +319,18 @@ def train_ngboost(
 
     # Asymmetric sample weights: плохие переводы важнее (из архитектуры)
     TAU, W_HIGH, W_LOW = 0.5, 3.0, 1.0
-    sample_weight = np.where(y_train < TAU, W_HIGH, W_LOW)
+    sample_weight = _build_train_sample_weights(
+        train_df,
+        synthetic_weight=synthetic_weight,
+        low_score_tau=TAU,
+        low_score_weight=W_HIGH,
+    )
     log.info(
         "Asymmetric weights: tau=%.2f  w_high=%.1f  w_low=%.1f  "
-        "(плохих примеров: %d / %d)",
+        "(плохих примеров: %d / %d, итоговый mean_weight=%.3f)",
         TAU, W_HIGH, W_LOW,
         (y_train < TAU).sum(), len(y_train),
+        float(sample_weight.mean()),
     )
 
     model = NGBRegressor(
@@ -319,6 +395,7 @@ def build_shap_explainer(
     shap_values = explainer.shap_values(X_sample)
     log.info("SHAP values shape: %s", np.array(shap_values).shape)
 
+    models_dir.mkdir(parents=True, exist_ok=True)
     explainer_path = models_dir / "shap_explainer.pkl"
     with open(explainer_path, "wb") as f:
         pickle.dump(explainer, f)
@@ -462,6 +539,15 @@ def main() -> None:
         "--eval-only", action="store_true",
         help="Только внешний тест на MQM, без переобучения",
     )
+    parser.add_argument(
+        "--synthetic-weight",
+        type=float,
+        default=DEFAULT_SYNTHETIC_WEIGHT,
+        help=(
+            "Вес synthetic train-строк относительно реальных. "
+            "0.1 по умолчанию: synthetic negatives помогают, но не доминируют."
+        ),
+    )
     args = parser.parse_args()
 
     processed_dir = args.data_dir / "processed"
@@ -476,9 +562,19 @@ def main() -> None:
     df, feature_cols = load_data(processed_dir)
 
     if args.model == "xgboost":
-        model = train_xgboost(df, feature_cols, args.models_dir)
+        model = train_xgboost(
+            df,
+            feature_cols,
+            args.models_dir,
+            synthetic_weight=args.synthetic_weight,
+        )
     else:
-        model = train_ngboost(df, feature_cols, args.models_dir)
+        model = train_ngboost(
+            df,
+            feature_cols,
+            args.models_dir,
+            synthetic_weight=args.synthetic_weight,
+        )
 
     build_shap_explainer(model, df, feature_cols, args.models_dir, args.model)
     external_test(model, processed_dir, feature_cols, args.model)
