@@ -31,7 +31,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Sequence
 
 import numpy as np
 import torch
@@ -91,15 +91,17 @@ class SpanModel:
                 f"Не найдена директория модели: {model_dir}\n"
                 "Запусти: python scripts/train_span_model.py"
             )
+        _validate_model_dir(model_dir)
 
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = torch.device(device)
 
         log.info("SpanModel: загрузка из %s на %s", model_dir, self.device)
-        self.tokenizer = AutoTokenizer.from_pretrained(str(model_dir))
+        self.tokenizer = AutoTokenizer.from_pretrained(str(model_dir), local_files_only=True)
         self.model = AutoModelForTokenClassification.from_pretrained(
-            str(model_dir)
+            str(model_dir),
+            local_files_only=True,
         ).to(self.device).eval()
 
         total = sum(p.numel() for p in self.model.parameters())
@@ -114,6 +116,7 @@ class SpanModel:
         src: str,
         mt: str,
         word_logprobs: Optional[List[float]] = None,
+        mt_words: Optional[Sequence[str]] = None,
     ) -> SpanPrediction:
         """
         Предсказывает severity для каждого слова mt и группирует BAD-слова в спаны.
@@ -125,15 +128,15 @@ class SpanModel:
 
         Возвращает SpanPrediction.
         """
-        mt_words = mt.split()
-        n_words  = len(mt_words)
+        token_words = list(mt_words) if mt_words is not None else mt.split()
+        n_words  = len(token_words)
 
         if n_words == 0:
             return SpanPrediction(word_labels=[], word_probs=[], spans=[])
 
         # Токенизация и инференс
         input_ids, attention_mask, mt_start_pos, word_to_first_subtoken = (
-            self._tokenize(src, mt, n_words)
+            self._tokenize(src, mt, token_words)
         )
 
         with torch.no_grad():
@@ -166,7 +169,7 @@ class SpanModel:
         self,
         src: str,
         mt: str,
-        n_words: int,
+        mt_words: Sequence[str],
     ) -> tuple[torch.Tensor, torch.Tensor, int, List[Optional[int]]]:
         """
         Возвращает:
@@ -204,7 +207,12 @@ class SpanModel:
         mt_start_pos = 1 + len(src_ids) + 1  # [CLS] + src + [SEP]
 
         # Маппинг субтокенов → spaCy слова
-        word_to_first_subtoken = _map_subtokens_to_words(mt, mt_offsets, n_words)
+        word_to_first_subtoken = _map_subtokens_to_words(
+            mt,
+            mt_offsets,
+            len(mt_words),
+            mt_words=mt_words,
+        )
 
         # Padding
         seq_len = len(input_ids_list)
@@ -327,6 +335,7 @@ def _map_subtokens_to_words(
     mt_text: str,
     offsets: list[tuple[int, int]],
     n_words: int,
+    mt_words: Optional[Sequence[str]] = None,
 ) -> List[Optional[int]]:
     """
     Для каждого субтокена (по char offset в mt_text) возвращает
@@ -335,13 +344,11 @@ def _map_subtokens_to_words(
     Первый субтокен слова → его индекс.
     Последующие субтокены того же слова → None (IGNORE).
     """
-    word_spans: List[tuple[int, int]] = []
-    pos = 0
-    for word in mt_text.split():
-        start = mt_text.index(word, pos)
-        end   = start + len(word)
-        word_spans.append((start, end))
-        pos = end
+    word_spans = _build_word_spans(mt_text, mt_words)
+    if len(word_spans) != n_words:
+        raise ValueError(
+            f"Ожидалось {n_words} слов для mt, но построено {len(word_spans)} спанов"
+        )
 
     result: List[Optional[int]] = []
     assigned: dict[int, bool]   = {}
@@ -363,3 +370,61 @@ def _map_subtokens_to_words(
         result.append(found)
 
     return result
+
+
+def _build_word_spans(
+    mt_text: str,
+    mt_words: Optional[Sequence[str]] = None,
+) -> List[tuple[int, int]]:
+    """
+    Строит char-span каждого слова mt в согласованной токенизации.
+
+    Если mt_words передан, используем его как источник истины и
+    восстанавливаем позиции токенов в исходной строке по порядку.
+    Иначе сохраняем совместимость со старым split()-поведением.
+    """
+    words = list(mt_words) if mt_words is not None else mt_text.split()
+    word_spans: List[tuple[int, int]] = []
+    pos = 0
+    for word in words:
+        if not word:
+            continue
+        start = mt_text.find(word, pos)
+        if start < 0:
+            raise ValueError(
+                f"Не удалось сопоставить токен '{word}' с текстом mt при pos={pos}"
+            )
+        end = start + len(word)
+        word_spans.append((start, end))
+        pos = end
+    return word_spans
+
+
+def _validate_model_dir(model_dir: Path) -> None:
+    """
+    Проверяет, что директория HF-артефакта содержит минимум файлов
+    для локального инференса без обращения в сеть.
+    """
+    required = [model_dir / "config.json"]
+    weight_candidates = [
+        model_dir / "model.safetensors",
+        model_dir / "pytorch_model.bin",
+    ]
+    tokenizer_candidates = [
+        model_dir / "tokenizer.json",
+        model_dir / "sentencepiece.bpe.model",
+        model_dir / "spiece.model",
+    ]
+
+    missing = [path.name for path in required if not path.exists()]
+    if not any(path.exists() for path in weight_candidates):
+        missing.append("model.safetensors|pytorch_model.bin")
+    if not any(path.exists() for path in tokenizer_candidates):
+        missing.append("tokenizer.json|sentencepiece.bpe.model|spiece.model")
+
+    if missing:
+        raise FileNotFoundError(
+            "Неполный HF-артефакт span-модели в "
+            f"{model_dir}. Не найдены: {', '.join(missing)}. "
+            "Переобучи/пересохрани модель через scripts/train_span_model.py."
+        )

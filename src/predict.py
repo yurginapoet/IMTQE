@@ -35,6 +35,7 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 
 from src.features.extractor import FeatureExtractor
+from src.features.schema import FEATURE_NAMES_CLASSIC, FEATURE_NAMES_LIGHT
 from src.interpretation.overall import OverallSentenceEvaluator, OverallSentenceResult
 from src.interpretation.rules import describe_error_type_ru
 from src.models.sentence_model import SentenceModel, MQM_CATEGORY_RU
@@ -119,18 +120,21 @@ class Predictor:
         if span_model_dir is None:
             span_model_dir = models_dir / "xlm_roberta_span"
 
+        log.info("Загрузка SentenceModel из %s", sentence_model_path)
+        self.sentence_model = SentenceModel(sentence_model_path, shap_explainer_path)
+        expected_feature_count = self.sentence_model.expected_feature_count
+
         log.info("Инициализация FeatureExtractor...")
         self.extractor = FeatureExtractor()
-        self.extractor.load_heavy_models()
+        require_neural = expected_feature_count > len(FEATURE_NAMES_CLASSIC)
+        self.extractor.load_heavy_models(require_neural=require_neural)
+        self._validate_extractor_features(expected_feature_count)
 
         # Сохраняем пути для перезагрузки
         self._sentence_model_path = sentence_model_path
         self._shap_explainer_path = shap_explainer_path
         self._span_model_dir = span_model_dir
         self._device = device
-
-        log.info("Загрузка SentenceModel из %s", sentence_model_path)
-        self.sentence_model = SentenceModel(sentence_model_path, shap_explainer_path)
 
         log.info("Загрузка SpanModel из %s", span_model_dir)
         self.span_model = SpanModel(span_model_dir, device=device)
@@ -168,7 +172,12 @@ class Predictor:
 
         # 4. Span-level: severity каждого слова → BAD-спаны
         word_logprobs = feats.get("word_logprobs") or None
-        span_pred = self.span_model.predict(src, mt, word_logprobs=word_logprobs)
+        span_pred = self.span_model.predict(
+            src,
+            mt,
+            word_logprobs=word_logprobs,
+            mt_words=mt_words,
+        )
 
         # 5. Сборка финального результата
         overall: OverallSentenceResult = self.overall.evaluate(
@@ -222,7 +231,12 @@ class Predictor:
         for (src, mt), feats, sentence_pred in zip(clean_pairs, feats_list, sentence_preds):
             mt_words      = _get_mt_words(feats, mt)
             word_logprobs = feats.get("word_logprobs") or None
-            span_pred     = self.span_model.predict(src, mt, word_logprobs=word_logprobs)
+            span_pred     = self.span_model.predict(
+                src,
+                mt,
+                word_logprobs=word_logprobs,
+                mt_words=mt_words,
+            )
 
             overall = self.overall.evaluate(
                 sentence_pred=sentence_pred,
@@ -264,6 +278,25 @@ class Predictor:
             device=self._device
         )
         log.info("SentenceModel и SpanModel успешно перезагружены.")
+
+    def _validate_extractor_features(self, expected_feature_count: int) -> None:
+        active_feature_count = len(self.extractor.active_feature_names)
+        if active_feature_count >= expected_feature_count:
+            return
+
+        if expected_feature_count <= len(FEATURE_NAMES_LIGHT):
+            required_label = "light"
+        elif expected_feature_count <= len(FEATURE_NAMES_CLASSIC):
+            required_label = "classic"
+        else:
+            required_label = "semantic-extended"
+
+        raise RuntimeError(
+            "FeatureExtractor не может собрать достаточно признаков для текущей "
+            f"sentence-модели: нужно {expected_feature_count}, доступно {active_feature_count} "
+            f"({required_label} model requirement). Проверь загрузку LaBSE/ruGPT-3 и "
+            "наличие models/semantic_pca.pkl для semantic extension."
+        )
 
 
 # ---------------------------------------------------------------------------

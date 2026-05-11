@@ -39,7 +39,12 @@ def load_encoder(
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
 
-    model = SentenceTransformer(model_name, device=resolved_device)
+    model_path = Config.resolve_hf_model_path(model_name)
+    model = SentenceTransformer(
+        model_path,
+        device=resolved_device,
+        local_files_only=Config.hf_local_files_only(),
+    )
     if resolved_device.startswith("cuda"):
         try:
             model.half()

@@ -33,6 +33,7 @@ async def lifespan(app: FastAPI):
     os.environ.setdefault("HF_HUB_OFFLINE", "1")
     os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
     os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+    os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 
     state: ModelsState = app.state.models_state
     log.info("=== MTQE: загрузка моделей (это займёт ~30–60 сек на CPU) ===")

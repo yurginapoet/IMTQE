@@ -1,5 +1,7 @@
 """Лёгкий модуль со схемой sentence-level признаков без тяжёлых импортов."""
 
+SEMANTIC_EXPLICIT = ["cosine_similarity", "embedding_distance"]
+
 FEATURE_NAMES_LIGHT = [
     "length_ratio", "abs_length_diff", "token_count_diff",
     "src_length", "mt_length",
@@ -9,11 +11,10 @@ FEATURE_NAMES_LIGHT = [
 ]
 
 FEATURE_NAMES_HEAVY = [
-    "cosine_similarity", "embedding_distance",
     "perplexity", "mean_log_prob", "token_ppl_variance", "min_token_log_prob",
 ]
 
-FEATURE_NAMES_CLASSIC = FEATURE_NAMES_LIGHT + FEATURE_NAMES_HEAVY
+FEATURE_NAMES_CLASSIC = FEATURE_NAMES_LIGHT + SEMANTIC_EXPLICIT + FEATURE_NAMES_HEAVY 
 
 SEMANTIC_FEATURE_NAMES = [
     f"semantic_{idx:02d}" for idx in range(64)

@@ -51,13 +51,16 @@ class FeatureExtractor:
         from sentence_transformers import SentenceTransformer
 
         self._log.info("Используем device=%s для тяжёлых моделей", self.device)
+        local_files_only = Config.hf_local_files_only()
 
         if self.labse_model is None:
             self._log.info("Загрузка LaBSE...")
             try:
+                labse_path = Config.resolve_hf_model_path(Config.LABSE_MODEL_NAME)
                 self.labse_model = SentenceTransformer(
-                    Config.LABSE_MODEL_NAME,
+                    labse_path,
                     device=self.device,
+                    local_files_only=local_files_only,
                 )
                 self._log.info("LaBSE загружена")
             except Exception as exc:
@@ -68,10 +71,17 @@ class FeatureExtractor:
         if self.gpt_model is None or self.gpt_tokenizer is None:
             self._log.info("Загрузка ruGPT-3 Small...")
             try:
-                self.gpt_tokenizer = AutoTokenizer.from_pretrained(Config.RUGPT_MODEL_NAME)
+                rugpt_path = Config.resolve_hf_model_path(Config.RUGPT_MODEL_NAME)
+                self.gpt_tokenizer = AutoTokenizer.from_pretrained(
+                    rugpt_path,
+                    local_files_only=local_files_only,
+                )
                 if self.gpt_tokenizer.pad_token is None:
                     self.gpt_tokenizer.pad_token = self.gpt_tokenizer.eos_token
-                self.gpt_model = AutoModelForCausalLM.from_pretrained(Config.RUGPT_MODEL_NAME)
+                self.gpt_model = AutoModelForCausalLM.from_pretrained(
+                    rugpt_path,
+                    local_files_only=local_files_only,
+                )
                 self.gpt_model.to(self.device)
                 self.gpt_model.eval()
                 self._log.info("ruGPT-3 загружен")
