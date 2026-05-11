@@ -2,5 +2,5 @@ __pycache__/
 *.pyc
 *.pyo
 architechture_req.md
-data/processed/sentence_da_features.parquet
-models/xlm_roberta_span/
+data/processed/
+models/
