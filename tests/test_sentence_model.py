@@ -13,6 +13,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from src.features.schema import INTERACTION_FEATURE_NAMES, SENTENCE_FEATURE_NAMES
 from src.models.sentence_model import (
     FEATURE_NAMES,
     FEATURE_TO_MQM,
@@ -55,15 +56,17 @@ def _features_for_model(model: SentenceModel, base: np.ndarray) -> np.ndarray:
 
 def test_feature_names_length():
     assert len(FEATURE_NAMES) == 86
+    assert len(SENTENCE_FEATURE_NAMES) == 97
+    assert len(INTERACTION_FEATURE_NAMES) == 11
     assert len(LEGACY_FEATURE_NAMES) == 22
-    print("OK  FEATURE_NAMES: 86 признаков, LEGACY_FEATURE_NAMES: 22 признака")
+    print("OK  FEATURE_NAMES: 86, SENTENCE: 97, LEGACY: 22")
 
 
 def test_feature_to_mqm_coverage():
-    for name in FEATURE_NAMES:
+    for name in SENTENCE_FEATURE_NAMES:
         assert name in FEATURE_TO_MQM, f"Признак '{name}' отсутствует в FEATURE_TO_MQM"
     assert "Semantic" in MQM_CATEGORY_RU
-    print("OK  FEATURE_TO_MQM: все 86 признаков покрыты")
+    print("OK  FEATURE_TO_MQM: все sentence-признаки покрыты")
 
 
 def test_beta_stats_basic():
