@@ -1,0 +1,11 @@
+{
+  "input_path": "data/processed/sentence_da_augmented.parquet",
+  "num_pairs": 301875,
+  "processed_rows": 301875,
+  "n_components": 64,
+  "device": "cuda",
+  "embed_batch_size": 256,
+  "chunk_size": 8192,
+  "explained_variance_ratio_sum": 0.33327503593852,
+  "pca_type": "IncrementalPCA"
+}
