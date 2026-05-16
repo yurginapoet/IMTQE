@@ -25,13 +25,25 @@ def load_predict_module():
 
     sentence_mod = ModuleType("src.models.sentence_model")
     sentence_mod.SentenceModel = object
+    class DummySentencePrediction:
+        def __init__(self, **kwargs):
+            for key, value in kwargs.items():
+                setattr(self, key, value)
+    sentence_mod.SentencePrediction = DummySentencePrediction
+    sentence_mod.SUPPORTED_MODEL_TYPES = ("xgboost", "ridge", "rf")
+    sentence_mod.FEATURE_TO_MQM = {"f0": "Accuracy", "f1": "Locale"}
     sentence_mod.MQM_CATEGORY_RU = {
         "Accuracy": "Accuracy",
         "Locale": "Locale",
     }
+    sentence_mod.resolve_sentence_artifacts = lambda models_dir, model_name="xgboost": (
+        Path(models_dir) / f"{model_name}.model",
+        Path(models_dir) / f"{model_name}.explainer.pkl",
+    )
 
     span_mod = ModuleType("src.models.span_model")
     span_mod.SpanModel = object
+    span_mod.SpanPrediction = object
 
     sys.modules["src.features.extractor"] = extractor_mod
     sys.modules["src.interpretation.overall"] = overall_mod
@@ -156,3 +168,6 @@ def test_predict_sentence_passes_extractor_tokens_to_span_model(tmp_path, monkey
     assert result.errors[0].span_text == "Привет ,"
     assert result.debug["shap_values"]["f0"] == pytest.approx(0.25)
     assert result.debug["shap_values"]["f1"] == pytest.approx(-0.15)
+    assert result.model_scores["ensemble"] == pytest.approx(0.8)
+    assert result.debug["models"]["ensemble"]["score"] == pytest.approx(0.8)
+    assert result.debug["span_penalty"]["has_bad_label"] is False
