@@ -14,6 +14,8 @@ const detailPanel = document.getElementById('detail-panel');
 const detailTitle = document.getElementById('detail-segment-title');
 const detailContent = document.getElementById('detail-content');
 const closeDetailBtn = document.getElementById('close-detail-btn');
+const modelSelect = document.getElementById('model-select');
+const compareAllCheckbox = document.getElementById('compare-all-checkbox');
 
 /**
  * Короткие названия и развёрнутые подсказки для переводчика (EN→RU).
@@ -293,6 +295,8 @@ function init() {
 
     addBtn.addEventListener('click', addSegment);
     evalAllBtn.addEventListener('click', evalAllSegments);
+    modelSelect?.addEventListener('change', resetAllInferences);
+    compareAllCheckbox?.addEventListener('change', resetAllInferences);
     closeDetailBtn.addEventListener('click', () => {
         detailPanel.classList.toggle('collapsed');
     });
@@ -330,6 +334,59 @@ async function pollStatus() {
 }
 
 setInterval(pollStatus, 3000);
+
+function getSelectedModel() {
+    return modelSelect?.value || 'xgboost';
+}
+
+function isCompareAllEnabled() {
+    return Boolean(compareAllCheckbox?.checked);
+}
+
+function modelDisplayName(name) {
+    if (name === 'ridge') return 'Ridge';
+    if (name === 'rf') return 'Random Forest';
+    return 'XGBoost';
+}
+
+function scoreToLabel(score) {
+    const pct = Number(score || 0) * 100;
+    if (pct >= 85) return 'отличный';
+    if (pct >= 70) return 'хороший';
+    if (pct >= 50) return 'средний';
+    if (pct >= 30) return 'слабый';
+    return 'плохой';
+}
+
+function scoreBadgeClass(score) {
+    const scorePercent = Number(score || 0) * 100;
+    let cls = 'score-badge';
+    if (scorePercent >= 80) cls += ' score-good';
+    else if (scorePercent >= 60) cls += ' score-warning';
+    else if (scorePercent >= 40) cls += ' score-bad';
+    else cls += ' score-verybad';
+    return cls;
+}
+
+function buildScoreBadge(score, modelName, compact = false) {
+    const scorePercent = Math.round(Number(score || 0) * 100);
+    const label = scoreToLabel(score);
+    const cls = scoreBadgeClass(score);
+    const modelPart = compact ? `<span class="compare-model-name">${escapeHtml(modelDisplayName(modelName))}</span> ` : '';
+    return `<span class="${cls}">${modelPart}${scorePercent}% · ${escapeHtml(label)}</span>`;
+}
+
+function renderCompareScores(modelScores, selectedModel) {
+    const entries = Object.entries(modelScores || {});
+    if (entries.length <= 1) return '';
+    const rows = entries
+        .map(([name, score]) => {
+            const selected = name === selectedModel ? ' (выбрана)' : '';
+            return `<div class="meta">${buildScoreBadge(score, name, true)}${escapeHtml(selected)}</div>`;
+        })
+        .join('');
+    return `<div class="compare-scores-block"><div class="meta"><strong>Сравнение моделей</strong></div>${rows}</div>`;
+}
 
 function addSegment() {
     const segment = {
@@ -391,7 +448,12 @@ async function evaluateSegment(id) {
         const res = await fetch('/api/evaluate', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ src: seg.src, mt: seg.mt }),
+            body: JSON.stringify({
+                src: seg.src,
+                mt: seg.mt,
+                model: getSelectedModel(),
+                compare_all: isCompareAllEnabled(),
+            }),
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
@@ -482,13 +544,13 @@ function updateScoreCell(row, seg) {
     } else if (seg.status === 'error') {
         scoreHtml = '<span class="score-badge score-verybad">ERR</span>';
     } else if (seg.result && seg.result.score !== undefined) {
-        const scorePercent = seg.result.score * 100;
-        let cls = 'score-badge';
-        if (scorePercent >= 80) cls += ' score-good';
-        else if (scorePercent >= 60) cls += ' score-warning';
-        else if (scorePercent >= 40) cls += ' score-bad';
-        else cls += ' score-verybad';
-        scoreHtml = `<span class="${cls}">${Math.round(scorePercent)}%</span>`;
+        scoreHtml = buildScoreBadge(seg.result.score, seg.result.selected_model || getSelectedModel());
+        if (seg.result.model_scores && Object.keys(seg.result.model_scores).length > 1) {
+            const compareHtml = Object.entries(seg.result.model_scores)
+                .map(([name, score]) => buildScoreBadge(score, name, true))
+                .join('');
+            scoreHtml += `<div class="compare-scores-inline">${compareHtml}</div>`;
+        }
     }
     cell.innerHTML = scoreHtml;
 }
@@ -559,6 +621,12 @@ function clearInference(seg) {
     if (activeErrorHighlight && activeErrorHighlight.segmentId === seg.id) {
         activeErrorHighlight = null;
     }
+}
+
+function resetAllInferences() {
+    segments.forEach((seg) => clearInference(seg));
+    renderTable();
+    renderDetail(currentSegmentId);
 }
 
 function updateMtHighlight(row, seg) {
@@ -744,7 +812,8 @@ function renderDetail(segmentId) {
 
     const r = seg.result;
     const scorePercent = (r.score * 100).toFixed(0);
-    detailTitle.textContent = `Сегмент #${getDisplayIndex(seg.id)} — Оценка: ${scorePercent}%`;
+    const scoreLabel = scoreToLabel(r.score);
+    detailTitle.textContent = `Сегмент #${getDisplayIndex(seg.id)} — Оценка: ${scorePercent}% (${scoreLabel})`;
 
     const ciLowPct = r.ci_low !== undefined ? (r.ci_low * 100).toFixed(0) : null;
     const ciHighPct = r.ci_high !== undefined ? (r.ci_high * 100).toFixed(0) : null;
@@ -753,10 +822,13 @@ function renderDetail(segmentId) {
     let html = `
         <div class="score-summary">
             <div class="big-score">${scorePercent}%</div>
+            <div class="meta">Категория качества: ${escapeHtml(scoreLabel)}</div>
+            <div class="meta">Выбранная модель: ${escapeHtml(modelDisplayName(r.selected_model || getSelectedModel()))}</div>
             <div class="progress-bar">
                 <div class="progress-fill" style="width:${scorePercent}%"></div>
             </div>
             <p class="meta-hint">Основная оценка — предсказание sentence-модели: насколько высоко качество перевода на шкале от 0% до 100% (чем выше, тем лучше).</p>
+            ${renderCompareScores(r.model_scores || {}, r.selected_model || getSelectedModel())}
             ${r.mqm_score !== undefined ? `
                 <div class="meta">MQM-индекс: ${mqmPct}% (внутренний 0–1: ${r.mqm_score.toFixed(2)})</div>
                 <p class="meta-hint">Отдельная шкала по найденным словесным ошибкам (штрафы MQM): 100% означает «нет штрафов за размеченные BAD-спаны»; чем ниже, тем больше суммарный штраф с учётом серьёзности (major/minor) и уверенности span-модели. Это не то же самое, что процент над прогресс-баром, а дополнение к нему.</p>

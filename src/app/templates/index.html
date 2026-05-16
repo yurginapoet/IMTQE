@@ -31,6 +31,16 @@
         <div class="toolbar">
             <button id="add-segment-btn" class="btn-primary">+ Добавить строку</button>
             <button id="eval-all-btn" class="btn-secondary">Оценить все сегменты</button>
+            <label for="model-select">Sentence-модель</label>
+            <select id="model-select" class="toolbar-select">
+                <option value="xgboost">XGBoost</option>
+                <option value="ridge">Ridge</option>
+                <option value="rf">Random Forest</option>
+            </select>
+            <label class="toolbar-checkbox">
+                <input type="checkbox" id="compare-all-checkbox">
+                Сравнить все 3
+            </label>
         </div>
 
         <!-- Sticky bottom panel (детали сегмента) -->

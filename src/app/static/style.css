@@ -296,6 +296,18 @@ th {
     font-weight: 700;
 }
 
+.compare-model-name {
+    font-size: 0.72rem;
+    opacity: 0.88;
+}
+
+.compare-scores-inline,
+.compare-scores-block {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
 .score-good {
     background: var(--good-soft);
     color: #0f7a55;
@@ -318,8 +330,26 @@ th {
 
 .toolbar {
     display: flex;
+    align-items: center;
     gap: 12px;
     flex-wrap: wrap;
+}
+
+.toolbar-select {
+    border: 1px solid #cfd7e4;
+    border-radius: 999px;
+    padding: 9px 14px;
+    background: #fff;
+    color: var(--ink);
+    font-weight: 600;
+}
+
+.toolbar-checkbox {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    color: #394860;
+    font-size: 0.92rem;
 }
 
 .btn-primary,

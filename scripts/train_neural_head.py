@@ -109,7 +109,11 @@ def train(
     torch.manual_seed(RANDOM_SEED)
     np.random.seed(RANDOM_SEED)
 
-    xgb_model_path = models_dir / "xgboost_sentence.model"
+    xgb_model_path = models_dir / "sentence_xgboost.model"
+    if not xgb_model_path.exists():
+        legacy_path = models_dir / "xgboost_sentence.model"
+        if legacy_path.exists():
+            xgb_model_path = legacy_path
     if not xgb_model_path.exists():
         raise FileNotFoundError(
             f"Не найден {xgb_model_path}. "

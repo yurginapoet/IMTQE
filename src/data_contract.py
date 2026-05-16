@@ -50,10 +50,16 @@ class ModelArtifacts:
     models_dir: Path
 
     def xgboost_sentence(self) -> Path:
-        return self.models_dir / "xgboost_sentence.model"
+        return self.models_dir / "sentence_xgboost.model"
+
+    def ridge_sentence(self) -> Path:
+        return self.models_dir / "sentence_ridge.pkl"
+
+    def rf_sentence(self) -> Path:
+        return self.models_dir / "sentence_rf.pkl"
 
     def shap_explainer(self) -> Path:
-        return self.models_dir / "shap_explainer.pkl"
+        return self.models_dir / "sentence_xgboost_explainer.pkl"
 
     def span_model_dir(self) -> Path:
         return self.models_dir / "xlm_roberta_span"

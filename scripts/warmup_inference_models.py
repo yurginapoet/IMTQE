@@ -73,8 +73,8 @@ def main() -> None:
     t0 = time.time()
     log.info("Проверка sentence-level модели...")
     sentence_model = SentenceModel(
-        Config.models_dir() / "xgboost_sentence.model",
-        Config.models_dir() / "shap_explainer.pkl",
+        Config.models_dir() / "sentence_xgboost.model",
+        Config.models_dir() / "sentence_xgboost_explainer.pkl",
     )
     log.info(
         "SentenceModel OK: expected_feature_count=%d",

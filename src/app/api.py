@@ -58,6 +58,9 @@ def get_predictor(request: Request):
 class EvaluateRequest(BaseModel):
     src: str = Field(..., description="Исходное предложение на английском")
     mt:  str = Field(..., description="Машинный перевод на русском")
+    model: str | None = Field(default=None, description="Sentence-модель: xgboost | ridge | rf")
+    compare_all: bool = Field(default=False, description="Вернуть оценки всех sentence-моделей")
+    confidence_threshold: float = Field(default=0.0, ge=0.0, le=1.0)
 
 
 class EvaluateBatchRequest(BaseModel):
@@ -130,7 +133,13 @@ async def evaluate(
 
     t0 = time.monotonic()
     try:
-        result = predictor.predict_sentence(req.src, req.mt)
+        result = predictor.predict_sentence(
+            req.src,
+            req.mt,
+            model_name=req.model or "xgboost",
+            compare_all=req.compare_all,
+            confidence_threshold=req.confidence_threshold,
+        )
     except Exception as e:
         log.error("Ошибка при evaluate: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Ошибка инференса: {e}")
