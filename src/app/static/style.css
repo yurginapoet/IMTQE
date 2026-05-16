@@ -28,7 +28,7 @@ body {
         radial-gradient(circle at top left, rgba(49, 112, 255, 0.08), transparent 28%),
         linear-gradient(180deg, #f6f9fc 0%, var(--bg) 100%);
     color: var(--ink);
-    font-family: "Segoe UI", system-ui, sans-serif;
+    font-family: "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, Roboto, sans-serif;
 }
 
 .app {
@@ -220,6 +220,7 @@ th {
     opacity: 0;
     visibility: hidden;
     transition: opacity 0.08s ease;
+    font-family: "Segoe UI", system-ui, sans-serif;
 }
 
 .qe-token-tooltip.visible {
@@ -278,6 +279,7 @@ th {
     font-size: 0.76rem;
     font-weight: 700;
     cursor: pointer;
+    font-family: inherit;
 }
 
 .eval-row-btn:hover {
@@ -288,24 +290,169 @@ th {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    min-width: 68px;
-    padding: 7px 12px;
-    border-radius: 999px;
+    min-width: 80px;
+    padding: 8px 16px;
+    border-radius: 60px;  
     background: #edf2f7;
     color: #50617d;
     font-weight: 700;
+    font-size: 0.9rem;
 }
 
-.compare-model-name {
-    font-size: 0.72rem;
-    opacity: 0.88;
+.score-badge.score-good {
+    background: #d9f7ea;
+    color: #0a5c3e;
 }
 
-.compare-scores-inline,
-.compare-scores-block {
+.score-badge.score-warning {
+    background: #fff2cb;
+    color: #8a6313;
+}
+
+.score-badge.score-bad {
+    background: #ffe8d6;
+    color: #c0611b;
+}
+
+.score-badge.score-verybad {
+    background: #ffe1e1;
+    color: #af3939;
+}
+
+.compare-models-block {
+    margin: 12px 0 4px;
+}
+
+.compare-models-label {
+    font-size: 0.8rem;
+    font-weight: 700;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 8px;
+}
+
+.compare-models-row {
     display: flex;
     flex-wrap: wrap;
-    gap: 8px;
+    gap: 12px;
+}
+
+.model-compare-btn {
+    display: inline-flex;
+    flex-direction: row;  /* меняем с column на row */
+    align-items: center;
+    gap: 8px;  /* расстояние между названием и процентами */
+    border: 2px solid transparent;
+    border-radius: 40px;  /* более круглые */
+    background: #f2f5fa;
+    color: #3d4d63;
+    padding: 10px 18px;  /* больше отступы */
+    font-size: 0.9rem;
+    font-family: inherit;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    text-align: center;
+}
+
+.model-compare-btn:hover {
+    cursor: pointer;  /* уже есть, но добавим явно */
+    background: #edf4ff;
+}
+
+.model-compare-btn.active {
+    border-color: var(--blue);
+    background: linear-gradient(135deg, #f2f7ff 0%, #dfeaff 100%);
+    color: #184bb5;
+    box-shadow: 0 4px 14px rgba(49, 112, 255, 0.18);
+}
+
+/* Цвет фона кнопки по качеству оценки */
+.model-compare-btn.score-good {
+    background: var(--good-soft);
+    color: #0f7a55;
+}
+.model-compare-btn.score-good.active {
+    border-color: var(--good);
+    background: linear-gradient(135deg, #d9f7ea 0%, #b5eed6 100%);
+    box-shadow: 0 4px 14px rgba(18, 150, 106, 0.18);
+}
+.model-compare-btn.score-warning {
+    background: var(--warn-soft);
+    color: #8a6313;
+}
+.model-compare-btn.score-warning.active {
+    border-color: var(--warn);
+    background: linear-gradient(135deg, #fff2cb 0%, #ffe49e 100%);
+    box-shadow: 0 4px 14px rgba(201, 138, 22, 0.18);
+}
+.model-compare-btn.score-bad {
+    background: #ffe8d6;
+    color: #c0611b;
+}
+.model-compare-btn.score-bad.active {
+    border-color: #e07030;
+    background: linear-gradient(135deg, #ffe8d6 0%, #ffd0b0 100%);
+    box-shadow: 0 4px 14px rgba(192, 97, 27, 0.18);
+}
+.model-compare-btn.score-verybad {
+    background: var(--bad-soft);
+    color: #af3939;
+}
+.model-compare-btn.score-verybad.active {
+    border-color: var(--bad);
+    background: linear-gradient(135deg, #ffe1e1 0%, #ffc5c5 100%);
+    box-shadow: 0 4px 14px rgba(213, 83, 83, 0.18);
+}
+
+.mcb-name {
+    font-weight: 700;
+    font-size: 0.82rem;
+}
+
+.mcb-score {
+    font-size: 0.79rem;
+    opacity: 0.85;
+}
+
+.score-top-row {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    margin-bottom: 6px;
+}
+
+.score-top-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.detail-view-label {
+    margin: 12px 0 4px;
+    font-size: 0.88rem;
+    color: var(--muted);
+}
+
+.expl-cats {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin: 8px 0 14px;
+}
+
+.expl-cat-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 0.88rem;
+    padding: 4px 0;
+    border-bottom: 1px solid #edf1f7;
+}
+
+.expl-cat-name {
+    color: #3d4d63;
 }
 
 .score-good {
@@ -342,6 +489,7 @@ th {
     background: #fff;
     color: var(--ink);
     font-weight: 600;
+    font-family: inherit;
 }
 
 .toolbar-checkbox {
@@ -359,6 +507,7 @@ th {
     padding: 10px 18px;
     font-weight: 700;
     cursor: pointer;
+    font-family: inherit;
 }
 
 .btn-primary {
@@ -387,6 +536,7 @@ th {
     cursor: pointer;
     border-radius: 10px;
     padding: 4px 7px;
+    font-family: inherit;
 }
 
 .delete-btn:hover {
@@ -429,6 +579,7 @@ th {
     cursor: pointer;
     font-size: 1rem;
     color: #6c7b93;
+    font-family: inherit;
 }
 
 .detail-content {
@@ -447,9 +598,69 @@ th {
     margin-bottom: 18px;
 }
 
+.explanation-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 6px 0 4px;
+}
+
+.explanation-tab {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    border: 1px solid #d6e0ef;
+    border-radius: 999px;
+    background: #f7faff;
+    color: #3d4d63;
+    padding: 8px 12px;
+    font-size: 0.84rem;
+    font-weight: 700;
+    cursor: pointer;
+    transition: all 0.12s ease;
+    font-family: inherit;
+}
+
+.explanation-tab:hover {
+    border-color: #9fc0ff;
+    background: #edf4ff;
+}
+
+.explanation-tab.active {
+    border-color: #3170ff;
+    background: linear-gradient(180deg, #f2f7ff 0%, #dfeaff 100%);
+    color: #184bb5;
+    box-shadow: 0 8px 18px rgba(49, 112, 255, 0.14);
+}
+
+.tab-score {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 46px;
+    padding: 3px 8px;
+    border-radius: 999px;
+    background: rgba(49, 112, 255, 0.1);
+    color: inherit;
+    font-size: 0.75rem;
+}
+
 .big-score {
     font-size: 2rem;
     font-weight: 800;
+}
+
+.big-score.score-good    { color: #0f7a55; }
+.big-score.score-warning { color: #8a6313; }
+.big-score.score-bad     { color: #c0611b; }
+.big-score.score-verybad { color: #af3939; }
+
+.model-compare-btn,
+.eval-row-btn,
+.delete-btn,
+.manual-feedback-btn,
+.explanation-tab {
+    cursor: pointer;
 }
 
 .progress-bar {
@@ -585,6 +796,7 @@ th {
     line-height: 1;
     user-select: none;
     vertical-align: middle;
+    font-family: inherit;
 }
 
 .feature-hint-summary:hover {
@@ -719,6 +931,13 @@ th {
     border-radius: 999px;
     padding: 9px 15px;
     cursor: pointer;
+    font-family: inherit;
+    font-size: 0.85rem;
+}
+
+.manual-feedback-btn:hover {
+    background: #eef3ff;
+    border-color: var(--blue);
 }
 
 @media (max-width: 700px) {
@@ -731,4 +950,83 @@ th {
     .app {
         padding: 14px;
     }
+}
+
+/* ПРИНУДИТЕЛЬНЫЕ СТИЛИ ДЛЯ КНОПОК - ПЕРЕЗАПИСЫВАЮТ ВСЁ */
+.model-compare-btn {
+    display: inline-flex !important;
+    flex-direction: row !important;
+    align-items: center !important;
+    gap: 12px !important;
+    border-radius: 60px !important;
+    padding: 12px 20px !important;
+    font-size: 0.95rem !important;
+    font-weight: 600 !important;
+    font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif !important;
+    background: #f0f2f5 !important;
+    border: 1px solid #d0d5dd !important;
+    cursor: pointer !important;
+    transition: all 0.2s ease !important;
+    margin: 0 !important;
+    line-height: 1.2 !important;
+}
+
+.model-compare-btn:hover {
+    background: #e4e8ed !important;
+    transform: translateY(-1px) !important;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1) !important;
+}
+
+.model-compare-btn.active {
+    background: linear-gradient(135deg, #3170ff 0%, #1a5be0 100%) !important;
+    border-color: #1a5be0 !important;
+    color: white !important;
+    box-shadow: 0 4px 12px rgba(49,112,255,0.3) !important;
+}
+
+.mcb-name {
+    font-weight: 700 !important;
+    font-size: 0.9rem !important;
+}
+
+.mcb-score {
+    font-size: 0.85rem !important;
+    opacity: 0.9 !important;
+}
+
+.compare-models-row {
+    display: flex !important;
+    flex-wrap: wrap !important;
+    gap: 12px !important;
+    margin-top: 8px !important;
+}
+
+/* Цвета для кнопок в зависимости от оценки */
+.model-compare-btn.score-good {
+    background: #d9f7ea !important;
+    border-color: #95debf !important;
+    color: #0a5c3e !important;
+}
+
+.model-compare-btn.score-good.active {
+    background: linear-gradient(135deg, #12966a 0%, #0d7a55 100%) !important;
+    color: white !important;
+}
+
+.model-compare-btn.score-warning {
+    background: #fff2cb !important;
+    border-color: #f7d98a !important;
+    color: #8a6313 !important;
+}
+
+.model-compare-btn.score-bad {
+    background: #ffe8d6 !important;
+    border-color: #f5bc8e !important;
+    color: #c0611b !important;
+}
+
+.model-compare-btn.score-verybad {
+    background: #ffe1e1 !important;
+    border-color: #f5acac !important;
+    color: #af3939 !important;
 }

@@ -11,6 +11,7 @@ from typing import Mapping
 
 def shap_categories_to_loss_shares(
     expl: Mapping[str, float],
+    loss_budget: float = 1.0,
     min_share: float = 0.005,
 ) -> dict[str, float]:
     """
@@ -37,5 +38,6 @@ def shap_categories_to_loss_shares(
     if total_filtered < 1e-8:
         return {}
 
-    # Финальная нормализация
-    return {k: v / total_filtered for k, v in filtered.items()}
+    # Финальная нормализация и масштабирование к "недостающему до 100%" бюджету
+    budget = max(0.0, float(loss_budget))
+    return {k: (v / total_filtered) * budget for k, v in filtered.items()}

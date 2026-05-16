@@ -5,6 +5,8 @@ let activeErrorHighlight = null;
 let modelReady = false;
 /** @type {HTMLElement | null} */
 let tokenTooltipEl = null;
+const EXPLANATION_VIEWS = ['ensemble', 'xgboost', 'rf', 'ridge'];
+const EXPLAINABLE_FEATURE_BLACKLIST = new Set([]);
 
 const tbody = document.getElementById('segments-tbody');
 const addBtn = document.getElementById('add-segment-btn');
@@ -14,8 +16,8 @@ const detailPanel = document.getElementById('detail-panel');
 const detailTitle = document.getElementById('detail-segment-title');
 const detailContent = document.getElementById('detail-content');
 const closeDetailBtn = document.getElementById('close-detail-btn');
-const modelSelect = document.getElementById('model-select');
-const compareAllCheckbox = document.getElementById('compare-all-checkbox');
+const modelSelect = null; // Removed UI element
+const compareAllCheckbox = null; // Removed UI element
 
 /**
  * Короткие названия и развёрнутые подсказки для переводчика (EN→RU).
@@ -79,6 +81,11 @@ const FEATURE_REGISTRY = {
         group: 'Орфография и лексика',
         label: 'Средняя редкость слов',
         hint: 'Средний частотный ранг слов в переводе. Чем выше — тем больше редких и потенциально проблемных слов используется.',
+    },
+    type_token_ratio: {
+        group: 'Орфография и лексика',
+        label: 'Лексическое разнообразие',
+        hint: 'Доля уникальных слов среди всех слов перевода. Это косвенный признак однообразия, повторов и бедной лексики, а не самостоятельная ошибка.',
     },
 
     // ─── СТИЛЬ И ПОВТОРЫ ───────────────────────────────────────
@@ -146,6 +153,11 @@ const FEATURE_REGISTRY = {
         label: 'Абсолютная разница в словах',
         hint: 'На сколько слов перевод отличается от оригинала.',
     },
+    token_count_diff: {
+        group: 'Структура и длина',
+        label: 'Разница в количестве токенов',
+        hint: 'Насколько общее число слов и знаков в переводе отличается от оригинала. Сильное расхождение может намекать на пропуски, добавления или разрыв структуры.',
+    },
 
     // ─── FLUENCY (тяжёлые признаки) ───────────────────────────
     perplexity: {
@@ -168,6 +180,16 @@ const FEATURE_REGISTRY = {
         label: 'Неравномерность качества',
         hint: 'Насколько неровно распределена естественность по словам. Большой разброс — в целом нормальный текст с одним-двумя очень странными местами.',
     },
+    avg_token_length: {
+        group: 'Контекст',
+        label: 'Средняя длина слова',
+        hint: 'Среднее число символов в слове перевода. Это технический контекстный сигнал, а не прямая ошибка, поэтому в разборе штрафа он скрыт.',
+    },
+    syntax_depth: {
+        group: 'Грамматика',
+        label: 'Синтаксическая сложность',
+        hint: 'Глубина синтаксического дерева перевода. Повышается у тяжёлых, запутанных конструкций и иногда помогает ловить неестественный синтаксис.',
+    },
 
     // ─── КОНТЕКСТНЫЕ ПРИЗНАКИ ──────────────────────────────────
     src_length: {
@@ -187,13 +209,56 @@ const FEATURE_REGISTRY = {
         label: 'Смысл при нормальной длине',
         hint: 'Комбинация: хороший смысл при нормальной длине перевода. Помогает отличить реальную смысловую ошибку от просто короткого/длинного текста.',
     },
+    log_perplexity: {
+        group: 'Грамотность',
+        label: 'Сглаженная неестественность',
+        hint: 'Логарифм перплексии. Это более устойчивый вариант оценки естественности, который помогает модели не переоценивать единичные выбросы.',
+    },
+    cosine_per_logppl: {
+        group: 'Точность и грамотность',
+        label: 'Смысл при естественном тексте',
+        hint: 'Комбинация смысловой близости и естественности формулировки. Важна, когда перевод вроде бы близок по смыслу, но звучит не по-русски.',
+    },
+    entity_x_cosine: {
+        group: 'Смысловая точность',
+        label: 'Сущности при сохранённом смысле',
+        hint: 'Совместный сигнал по ключевым сущностям и общей смысловой близости. Особенно полезен для имён, дат, организаций и терминов.',
+    },
+    oov_x_bad_cosine: {
+        group: 'Орфография и лексика',
+        label: 'Редкие слова при смысловом сбое',
+        hint: 'Комбинация нетипичных слов и смыслового расхождения. Часто растёт, когда в переводе есть странные словоформы или непереведённые куски.',
+    },
     logprob_spike: {
         group: 'Грамотность',
-        label: 'Всплеск неуверенности',
-        hint: 'Разница между средней и минимальной предсказуемостью слов. Большой всплеск почти всегда указывает на конкретное проблемное место.',
+        label: 'Резкий провал естественности',
+        hint: 'Разница между средней и минимальной предсказуемостью слов. Большой провал почти всегда указывает на конкретное проблемное место.',
     },
-
-    // Добавь остальные interaction-признаки по аналогии, если нужно
+    variance_x_bad_cosine: {
+        group: 'Точность и грамотность',
+        label: 'Неровный текст при смысловом сбое',
+        hint: 'Комбинация смыслового расхождения и сильного разброса по качеству слов. Подсвечивает случаи, где часть перевода хорошая, а часть явно сломана.',
+    },
+    normed_length_diff: {
+        group: 'Структура и длина',
+        label: 'Нормированное отклонение длины',
+        hint: 'Отклонение длины перевода от ожидаемой с поправкой на размер предложения. Помогает сравнивать короткие и длинные сегменты.',
+    },
+    digit_x_entity: {
+        group: 'Локализация и формат',
+        label: 'Числа в ключевых сущностях',
+        hint: 'Комбинация чисел и именованных сущностей. Полезна для дат, номеров моделей, сумм и других важных фактов внутри названий.',
+    },
+    formal_x_cosine: {
+        group: 'Стиль и повторы',
+        label: 'Стиль при сохранённом смысле',
+        hint: 'Комбинация регистра речи и смысловой близости. Нужна, когда смысл сохранён, но тон перевода не подходит контексту.',
+    },
+    punct_ratio: {
+        group: 'Локализация и формат',
+        label: 'Согласованность пунктуации',
+        hint: 'Насколько пунктуационная структура перевода соответствует оригиналу. Может сигнализировать о пропусках, склейке предложений или сбое форматирования.',
+    },
 };
 
 
@@ -264,8 +329,10 @@ const MIN_LOSS_SHARE = 0.005;
  * доля i = |SHAP_i| / sum_j|SHAP_j^-|, отбрасываем <0.5%, перенормируем остаток к 100%.
  * Возвращает строки с полем lossFraction (0..1) для отображения.
  */
-function buildLossOnlyFeatureRows(combined) {
-    const neg = combined.filter((x) => (Number(x.shap) || 0) < 0);
+function buildLossOnlyFeatureRows(combined, score) {
+    const lossBudget = Math.max(0, 1 - Number(score || 0));
+    if (lossBudget <= 1e-12) return [];
+    const neg = combined.filter((x) => (Number(x.shap) || 0) < 0 && !EXPLAINABLE_FEATURE_BLACKLIST.has(x.key));
     const totalAbs = neg.reduce((s, x) => s + Math.abs(Number(x.shap) || 0), 0);
     if (totalAbs <= 1e-12) return [];
     const withPart = neg.map((x) => ({
@@ -278,7 +345,7 @@ function buildLossOnlyFeatureRows(combined) {
     return kept
         .map((x) => ({
             ...x,
-            lossFraction: x.part / s2,
+            lossFraction: (x.part / s2) * lossBudget,
         }))
         .sort((a, b) => (Number(b.lossFraction) || 0) - (Number(a.lossFraction) || 0));
 }
@@ -309,6 +376,7 @@ function init() {
     tbody.addEventListener('scroll', handleEditorScroll, true);
     tbody.addEventListener('mousemove', handleEditorShellMouseMove);
     tbody.addEventListener('mouseleave', hideTokenTooltip, true);
+    detailContent.addEventListener('click', handleDetailClick);
 }
 
 init();
@@ -344,6 +412,7 @@ function isCompareAllEnabled() {
 }
 
 function modelDisplayName(name) {
+    if (name === 'ensemble') return 'Общая оценка';
     if (name === 'ridge') return 'Ridge';
     if (name === 'rf') return 'Random Forest';
     return 'XGBoost';
@@ -351,41 +420,53 @@ function modelDisplayName(name) {
 
 function scoreToLabel(score) {
     const pct = Number(score || 0) * 100;
-    if (pct >= 85) return 'отличный';
-    if (pct >= 70) return 'хороший';
-    if (pct >= 50) return 'средний';
-    if (pct >= 30) return 'слабый';
-    return 'плохой';
+    if (pct >= 85) return 'Отличный';
+    if (pct >= 70) return 'Хороший';
+    if (pct >= 50) return 'Средний';
+    if (pct >= 30) return 'Слабый';
+    return 'Плохой';
 }
 
 function scoreBadgeClass(score) {
     const scorePercent = Number(score || 0) * 100;
     let cls = 'score-badge';
-    if (scorePercent >= 80) cls += ' score-good';
+    if (scorePercent >= 70) cls += ' score-good';  // было >= 80
     else if (scorePercent >= 60) cls += ' score-warning';
     else if (scorePercent >= 40) cls += ' score-bad';
     else cls += ' score-verybad';
     return cls;
 }
 
-function buildScoreBadge(score, modelName, compact = false) {
+function buildScoreBadge(score) {
     const scorePercent = Math.round(Number(score || 0) * 100);
     const label = scoreToLabel(score);
     const cls = scoreBadgeClass(score);
-    const modelPart = compact ? `<span class="compare-model-name">${escapeHtml(modelDisplayName(modelName))}</span> ` : '';
-    return `<span class="${cls}">${modelPart}${scorePercent}% · ${escapeHtml(label)}</span>`;
+    return `<span class="${cls}">${scorePercent}%  ${escapeHtml(label)}</span>`;
 }
 
-function renderCompareScores(modelScores, selectedModel) {
+function renderCompareScores(modelScores, activeView, segId) {
     const entries = Object.entries(modelScores || {});
-    if (entries.length <= 1) return '';
+    if (!entries.length) return '';
+
     const rows = entries
         .map(([name, score]) => {
-            const selected = name === selectedModel ? ' (выбрана)' : '';
-            return `<div class="meta">${buildScoreBadge(score, name, true)}${escapeHtml(selected)}</div>`;
+            const scorePercent = Math.round(Number(score || 0) * 100);
+            const label = scoreToLabel(score);
+            const isActive = name === activeView;
+            const badgeCls = scoreBadgeClass(score).replace('score-badge', '').trim();
+            return `<button
+                class="model-compare-btn${isActive ? ' active' : ''} ${badgeCls}"
+                data-action="explanation-tab"
+                data-segid="${segId}"
+                data-view="${name}"
+            ><span class="mcb-name">${escapeHtml(modelDisplayName(name))}</span><span class="mcb-score">${scorePercent}% · ${escapeHtml(label)}</span></button>`;
         })
         .join('');
-    return `<div class="compare-scores-block"><div class="meta"><strong>Сравнение моделей</strong></div>${rows}</div>`;
+
+    return `<div class="compare-models-block">
+        <div class="compare-models-label">Сравнение моделей</div>
+        <div class="compare-models-row">${rows}</div>
+    </div>`;
 }
 
 function addSegment() {
@@ -396,6 +477,7 @@ function addSegment() {
         result: null,
         cache: null,
         status: 'idle',
+        explanationView: 'ensemble',
     };
     segments.push(segment);
     currentSegmentId = segment.id;
@@ -459,7 +541,11 @@ async function evaluateSegment(id) {
 
         const data = await res.json();
         seg.result = data;
+        // Исправление: кэшируем debug.models в seg.cache.models для удобства
         seg.cache = data.debug || null;
+        if (seg.cache && seg.cache.models) {
+            seg.cache.models = seg.cache.models;
+        }
         seg.status = 'done';
 
         refreshRow(id);
@@ -544,13 +630,7 @@ function updateScoreCell(row, seg) {
     } else if (seg.status === 'error') {
         scoreHtml = '<span class="score-badge score-verybad">ERR</span>';
     } else if (seg.result && seg.result.score !== undefined) {
-        scoreHtml = buildScoreBadge(seg.result.score, seg.result.selected_model || getSelectedModel());
-        if (seg.result.model_scores && Object.keys(seg.result.model_scores).length > 1) {
-            const compareHtml = Object.entries(seg.result.model_scores)
-                .map(([name, score]) => buildScoreBadge(score, name, true))
-                .join('');
-            scoreHtml += `<div class="compare-scores-inline">${compareHtml}</div>`;
-        }
+        scoreHtml = buildScoreBadge(seg.result.score);
     }
     cell.innerHTML = scoreHtml;
 }
@@ -583,6 +663,19 @@ function handleTableInput(event) {
 function handleTableClick(event) {
     const target = event.target;
     const id = Number(target.dataset.id || target.closest('tr')?.dataset.id);
+
+    if (target.dataset.action === 'explanation-tab') {
+        const seg = getSegment(Number(target.dataset.segid));
+        if (!seg) return;
+        seg.explanationView = target.dataset.view || 'ensemble';
+        if (currentSegmentId !== seg.id) {
+            currentSegmentId = seg.id;
+            renderSelection();
+        }
+        renderDetail(seg.id);
+        return;
+    }
+
     if (!id) return;
 
     if (target.classList.contains('delete-btn')) {
@@ -618,6 +711,7 @@ function clearInference(seg) {
     seg.result = null;
     seg.cache = null;
     seg.status = 'idle';
+    seg.explanationView = 'ensemble';
     if (activeErrorHighlight && activeErrorHighlight.segmentId === seg.id) {
         activeErrorHighlight = null;
     }
@@ -717,8 +811,7 @@ function buildTokenMeta(errors, segmentId) {
         const active = (
             activeErrorHighlight
             && activeErrorHighlight.segmentId === segmentId
-            && tokenIndex >= activeErrorHighlight.startIdx
-            && tokenIndex <= activeErrorHighlight.endIdx
+            && tokenIndex >= activeErrorHighlight.startIdx            && tokenIndex <= activeErrorHighlight.endIdx
         );
         row.active = active;
     }
@@ -802,6 +895,23 @@ function autoResizeAll() {
     document.querySelectorAll('.editable-text').forEach(autoResize);
 }
 
+function handleDetailClick(event) {
+    const btn = event.target.closest('[data-action="explanation-tab"]');
+    if (!btn) return;
+
+    const segId = Number(btn.dataset.segid);
+    const view = btn.dataset.view;
+    const seg = getSegment(segId);
+    if (!seg || !view) return;
+
+    seg.explanationView = view;
+    if (currentSegmentId !== segId) {
+        currentSegmentId = segId;
+        renderSelection();
+    }
+    renderDetail(segId);
+}
+
 function renderDetail(segmentId) {
     const seg = getSegment(segmentId);
     if (!seg || !seg.result) {
@@ -811,52 +921,85 @@ function renderDetail(segmentId) {
     }
 
     const r = seg.result;
+    const activeView = getActiveExplanationView(seg);
+    const activeModelData = getModelDetail(seg, activeView);
     const scorePercent = (r.score * 100).toFixed(0);
     const scoreLabel = scoreToLabel(r.score);
-    detailTitle.textContent = `Сегмент #${getDisplayIndex(seg.id)} — Оценка: ${scorePercent}% (${scoreLabel})`;
+    detailTitle.textContent = `Сегмент #${getDisplayIndex(seg.id)} — ${scorePercent}% · ${scoreLabel}`;
 
-    const ciLowPct = r.ci_low !== undefined ? (r.ci_low * 100).toFixed(0) : null;
-    const ciHighPct = r.ci_high !== undefined ? (r.ci_high * 100).toFixed(0) : null;
+    const activeScore = Number(activeModelData?.score ?? r.score ?? 0);
+    const ciLowPct = activeModelData?.ci_low !== undefined
+        ? (activeModelData.ci_low * 100).toFixed(0)
+        : (r.ci_low !== undefined ? (r.ci_low * 100).toFixed(0) : null);
+    const ciHighPct = activeModelData?.ci_high !== undefined
+        ? (activeModelData.ci_high * 100).toFixed(0)
+        : (r.ci_high !== undefined ? (r.ci_high * 100).toFixed(0) : null);
     const mqmPct = r.mqm_score !== undefined ? (r.mqm_score * 100).toFixed(0) : null;
+
+    // Model scores block: если API вернул model_scores — показываем сравнение
+    const modelScores = r.model_scores || {};
+    // Fallback: если нет model_scores, показываем основную оценку как единственную
+    const displayModelScores = Object.keys(modelScores).length
+        ? modelScores
+        : { xgboost: r.score };
+
+    const scoreColorCls = scoreBadgeClass(r.score).replace('score-badge', '').trim();
 
     let html = `
         <div class="score-summary">
-            <div class="big-score">${scorePercent}%</div>
-            <div class="meta">Категория качества: ${escapeHtml(scoreLabel)}</div>
-            <div class="meta">Выбранная модель: ${escapeHtml(modelDisplayName(r.selected_model || getSelectedModel()))}</div>
+            <div class="score-top-row">
+                <div class="big-score ${scoreColorCls}">${scorePercent}%</div>
+                <div class="score-top-meta">
+                    <div class="meta"><strong>${escapeHtml(scoreLabel)}</strong></div>
+                    ${ciLowPct != null && ciHighPct != null
+                        ? `<div class="meta">CI₉₅: ${ciLowPct}–${ciHighPct}%</div>`
+                        : ''}
+                    ${mqmPct != null
+                        ? `<div class="meta">MQM: ${mqmPct}%</div>`
+                        : ''}
+                </div>
+            </div>
             <div class="progress-bar">
                 <div class="progress-fill" style="width:${scorePercent}%"></div>
             </div>
-            <p class="meta-hint">Основная оценка — предсказание sentence-модели: насколько высоко качество перевода на шкале от 0% до 100% (чем выше, тем лучше).</p>
-            ${renderCompareScores(r.model_scores || {}, r.selected_model || getSelectedModel())}
-            ${r.mqm_score !== undefined ? `
-                <div class="meta">MQM-индекс: ${mqmPct}% (внутренний 0–1: ${r.mqm_score.toFixed(2)})</div>
-                <p class="meta-hint">Отдельная шкала по найденным словесным ошибкам (штрафы MQM): 100% означает «нет штрафов за размеченные BAD-спаны»; чем ниже, тем больше суммарный штраф с учётом серьёзности (major/minor) и уверенности span-модели. Это не то же самое, что процент над прогресс-баром, а дополнение к нему.</p>
-            ` : ''}
-            ${ciLowPct != null && ciHighPct != null ? `
-                <div class="meta">Непараметрический доверительный интервал 95% для оценки качества: ${ciLowPct}–${ciHighPct}%</div>
-                <p class="meta-hint">По sentence-модели: если бы мы много раз слегка меняли вход, в таком диапазоне с большой вероятностью оказалась бы «истинная» оценка на той же шкале 0–100%. Узкий интервал — модель увереннее; широкий — больше неопределённость.</p>
-            ` : ''}
+            ${renderCompareScores(displayModelScores, activeView, seg.id)}
         </div>
     `;
 
-    if (seg.cache && seg.cache.features) {
-        const features = seg.cache.features;
-        const shapValues = seg.cache.shap_values || {};
+    // Пояснение: SHAP для активной модели
+    if (seg.cache && seg.cache.features && activeModelData) {
+        const features = activeModelData.feature_values || seg.cache.features;
+        const shapValues = activeModelData.shap_values || {};
         const featureEntries = Object.entries(features).map(([key, value]) => ({
             key,
             value,
             shap: getShapValue(shapValues, key),
         }));
 
-        const lossRows = buildLossOnlyFeatureRows(featureEntries);
+        const lossRows = buildLossOnlyFeatureRows(featureEntries, activeScore);
 
         if (lossRows.length) {
-            html += renderFeatureGroupsPanel(lossRows);
+            html += `<p class="detail-view-label">Разбор штрафа: <strong>${escapeHtml(modelDisplayName(activeView))}</strong></p>`;
+            html += renderFeatureGroupsPanel(lossRows, activeView, activeScore);
         } else if (featureEntries.some((x) => (Number(x.shap) || 0) !== 0)) {
-            html += '<p class="semantic-note">Нет заметного отрицательного вклада признаков (снижающих оценку от идеала 100%), либо все доли ниже 0.5% от суммарного штрафа.</p>';
+            html += '<p class="semantic-note">Нет заметного отрицательного вклада признаков.</p>';
         } else {
             html += '<p class="semantic-note">SHAP-вклады для этой пары около нуля.</p>';
+        }
+    } else if (seg.cache && seg.cache.features) {
+        // Нет activeModelData, но есть фичи — покажем просто пояснение из explanation
+        const expl = r.explanation || {};
+        if (Object.keys(expl).length) {
+            html += '<h4 class="feature-panel-title">Вклад категорий (SHAP)</h4>';
+            html += '<div class="expl-cats">';
+            for (const [cat, val] of Object.entries(expl)) {
+                const pct = Math.abs(Number(val) * 100).toFixed(1);
+                const sign = Number(val) >= 0 ? 'positive' : 'negative';
+                html += `<div class="expl-cat-row"><span class="expl-cat-name">${escapeHtml(cat)}</span><span class="feature-shap ${sign}">${sign === 'negative' ? '−' : '+'}${pct}%</span></div>`;
+            }
+            html += '</div>';
+        } else {
+            html += '<p><em>Debug-признаки недоступны.</em></p>';
         }
     } else {
         html += '<p><em>Debug-признаки недоступны.</em></p>';
@@ -879,7 +1022,7 @@ function renderDetail(segmentId) {
         html += '<p><em>Ошибок не обнаружено.</em></p>';
     }
 
-    html += '<button id="manual-feedback-btn" class="manual-feedback-btn">Отметить ошибку вручную</button>';
+    html += '<button id="manual-feedback-btn" class="manual-feedback-btn">✎ Отметить ошибку вручную</button>';
     detailContent.innerHTML = html;
 
     document.querySelectorAll('.error-row').forEach((row) => {
@@ -922,7 +1065,7 @@ function formatLossSharePercent(lossFraction) {
     return `${pct.toFixed(decimals)}%`;
 }
 
-function renderFeatureGroupsPanel(items) {
+function renderFeatureGroupsPanel(items, viewName, score) {
     if (!items.length) return '';
 
     const maxFrac = Math.max(...items.map((item) => Number(item.lossFraction) || 0), 1e-6);
@@ -942,7 +1085,7 @@ function renderFeatureGroupsPanel(items) {
     }
 
     const note =
-        'Показаны только признаки, которые по SHAP снижают оценку относительно идеала (100%). Число в строке — доля в суммарном штрафе после отсечения <0.5% и перенормировки к 100%. Карточки блоков — по убыванию суммы долей в блоке.';
+        `Показаны только признаки, которые по SHAP снижают ${modelDisplayName(viewName).toLowerCase()} относительно идеала 100%. Если модель дала ${Math.round((Number(score) || 0) * 100)}%, распределяется только оставшийся штраф до 100%.`;
 
     let html = '<h4 class="feature-panel-title">Доли штрафа по признакам (от идеала 100%)</h4>';
     html += `<p class="semantic-note">${escapeHtml(note)}</p>`;
@@ -996,6 +1139,32 @@ function getShapValue(shapValues, key) {
         return Number(shapValues[key] || 0);
     }
     return 0;
+}
+
+function getActiveExplanationView(seg) {
+    const stored = seg?.explanationView || 'ensemble';
+    const models = seg?.cache?.models || {};
+    if (models[stored]) return stored;
+    if (models.ensemble) return 'ensemble';
+    return Object.keys(models)[0] || 'ensemble';
+}
+
+function getModelDetail(seg, viewName) {
+    return seg?.cache?.models?.[viewName] || null;
+}
+
+function renderExplanationTabs(seg) {
+    const models = seg?.cache?.models || {};
+    const current = getActiveExplanationView(seg);
+    const tabs = EXPLANATION_VIEWS
+        .filter((name) => models[name])
+        .map((name) => {
+            const score = Number(models[name]?.score ?? seg.result?.model_scores?.[name] ?? 0);
+            const active = name === current ? ' active' : '';
+            return `<button class="explanation-tab${active}" data-action="explanation-tab" data-segid="${seg.id}" data-view="${name}">${escapeHtml(modelDisplayName(name))}<span class="tab-score">${Math.round(score * 100)}%</span></button>`;
+        })
+        .join('');
+    return tabs ? `<div class="explanation-tabs">${tabs}</div>` : '';
 }
 
 function highlightErrorInSegment(segmentId, startIdx, endIdx) {
