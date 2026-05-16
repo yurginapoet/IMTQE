@@ -1,5 +1,5 @@
 """
-Прогревает и проверяет все артефакты, нужные для полного инференса.
+Прогревает и проверяет все артефакты, нужные для инференса.
 
 По умолчанию работает в offline-режиме и проверяет, что модели уже есть в локальном кэше.
 С флагом --download разрешает Hugging Face загрузить недостающие sentence-модели.
@@ -85,9 +85,8 @@ def main() -> None:
     extractor = FeatureExtractor(device=args.device)
     extractor.load_heavy_models(require_neural=True)
     log.info(
-        "FeatureExtractor OK: active_feature_count=%d, semantic_augmented=%s",
+        "FeatureExtractor OK: active_feature_count=%d",
         len(extractor.active_feature_names),
-        extractor.semantic_augmented_loaded,
     )
 
     log.info("Проверка span-модели...")

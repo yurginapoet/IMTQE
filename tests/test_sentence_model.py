@@ -55,17 +55,16 @@ def _features_for_model(model: SentenceModel, base: np.ndarray) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 def test_feature_names_length():
-    assert len(FEATURE_NAMES) == 86
-    assert len(SENTENCE_FEATURE_NAMES) == 97
-    assert len(INTERACTION_FEATURE_NAMES) == 11
+    assert len(FEATURE_NAMES) == 33
+    assert len(SENTENCE_FEATURE_NAMES) == 43
+    assert len(INTERACTION_FEATURE_NAMES) == 10
     assert len(LEGACY_FEATURE_NAMES) == 22
-    print("OK  FEATURE_NAMES: 86, SENTENCE: 97, LEGACY: 22")
+    print("OK  FEATURE_NAMES: 33, SENTENCE: 43, LEGACY: 22")
 
 
 def test_feature_to_mqm_coverage():
     for name in SENTENCE_FEATURE_NAMES:
         assert name in FEATURE_TO_MQM, f"Признак '{name}' отсутствует в FEATURE_TO_MQM"
-    assert "Semantic" in MQM_CATEGORY_RU
     print("OK  FEATURE_TO_MQM: все sentence-признаки покрыты")
 
 
@@ -87,8 +86,8 @@ def test_xgboost_uncertainty_bounds():
 
 def test_aggregate_shap_categories():
     agg = _aggregate_shap(np.ones(len(FEATURE_NAMES), dtype=np.float32), FEATURE_NAMES)
-    assert set(agg.keys()) == {"Accuracy", "Fluency", "Terminology", "Locale", "Style", "Semantic"}
-    assert abs(sum(agg.values()) - 84.0) < 1e-5
+    assert set(agg.keys()) == {"Accuracy", "Fluency", "Terminology", "Locale", "Style"}
+    assert abs(sum(agg.values()) - 31.0) < 1e-5
     print(f"OK  _aggregate_shap: {list(agg.keys())} сумма={sum(agg.values()):.1f}")
 
 

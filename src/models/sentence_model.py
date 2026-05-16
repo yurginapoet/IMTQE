@@ -1,7 +1,8 @@
 """
 Инференс sentence-level модели (XGBoost) и SHAP explainer.
 
-Поддерживает sentence-вектор с semantic PCA, классику без PCA, старые размерности.
+Поддерживает актуальный интерпретируемый sentence-вектор
+и обратную совместимость со старыми размерностями модели.
 """
 
 from __future__ import annotations
@@ -17,17 +18,15 @@ import xgboost as xgb
 from scipy.stats import beta as scipy_beta
 
 from src.features.schema import (
-    FEATURE_NAMES as FULL_FEATURE_NAMES,
-    FEATURE_NAMES_CLASSIC as LEGACY_FEATURE_NAMES,
+    FEATURE_NAMES_CLASSIC,
     FEATURE_NAMES_LIGHT,
-    SEMANTIC_FEATURE_NAMES,
     SENTENCE_FEATURE_NAMES,
-    SENTENCE_FEATURE_NAMES_CLASSIC,
 )
 
 log = logging.getLogger(__name__)
 
-FEATURE_NAMES = FULL_FEATURE_NAMES
+FEATURE_NAMES = FEATURE_NAMES_CLASSIC
+LEGACY_FEATURE_NAMES = FEATURE_NAMES_LIGHT
 
 FEATURE_TO_MQM: Dict[str, str | None] = {
     "length_ratio": "Accuracy",
@@ -35,10 +34,15 @@ FEATURE_TO_MQM: Dict[str, str | None] = {
     "token_count_diff": "Accuracy",
     "src_length": None,
     "mt_length": None,
+    "compression_ratio": "Accuracy",
+    "sentence_count_diff": "Accuracy",
     "digit_match_ratio": "Locale",
     "punct_ratio": "Locale",
     "quotes_mismatch": "Locale",
     "date_format_error": "Locale",
+    "number_count_diff": "Locale",
+    "capitalization_mismatch": "Style",
+    "currency_symbol_mismatch": "Locale",
     "oov_ratio": "Fluency",
     "type_token_ratio": "Fluency",
     "avg_token_length": "Fluency",
@@ -46,6 +50,12 @@ FEATURE_TO_MQM: Dict[str, str | None] = {
     "agreement_errors": "Fluency",
     "syntax_depth": "Fluency",
     "formal_ratio": "Style",
+    "morphology_error_rate": "Fluency",
+    "repetition_ratio": "Style",
+    "named_entity_missing_ratio": "Terminology",
+    "latin_ratio": "Accuracy",
+    "avg_word_rank": "Fluency",
+    "untranslated_ratio": "Accuracy",
     "cosine_similarity": "Accuracy",
     "embedding_distance": "Accuracy",
     "perplexity": "Fluency",
@@ -53,7 +63,6 @@ FEATURE_TO_MQM: Dict[str, str | None] = {
     "token_ppl_variance": "Fluency",
     "min_token_log_prob": "Fluency",
 }
-FEATURE_TO_MQM.update({name: "Semantic" for name in SEMANTIC_FEATURE_NAMES})
 FEATURE_TO_MQM.update(
     {
         "cosine_x_length_ok": "Accuracy",
@@ -66,8 +75,6 @@ FEATURE_TO_MQM.update(
         "normed_length_diff": "Accuracy",
         "digit_x_entity": "Locale",
         "formal_x_cosine": "Style",
-        "dist_x_logppl": "Accuracy",
-        "xgb_score": "EnsembleBase",
     }
 )
 
@@ -77,8 +84,6 @@ MQM_CATEGORY_RU: Dict[str, str] = {
     "Terminology": "Терминология",
     "Locale": "Локаль/форматирование",
     "Style": "Стиль/регистр",
-    "Semantic": "Семантическая согласованность",
-    "EnsembleBase": "База градиентного бустинга",
     "Other": "Прочее",
 }
 
@@ -184,7 +189,7 @@ class SentenceModel:
         if background_data is not None and getattr(background_data, "shape", None):
             return int(background_data.shape[1])
 
-        return len(FULL_FEATURE_NAMES)
+        return len(FEATURE_NAMES)
 
     def _prepare_features(self, features: np.ndarray) -> np.ndarray:
         X = features.reshape(1, -1) if features.ndim == 1 else features
@@ -247,18 +252,16 @@ class SentenceModel:
 def _infer_feature_names(count: int) -> list[str]:
     if count == len(SENTENCE_FEATURE_NAMES):
         return list(SENTENCE_FEATURE_NAMES)
-    if count == len(SENTENCE_FEATURE_NAMES_CLASSIC):
-        return list(SENTENCE_FEATURE_NAMES_CLASSIC)
-    if count == len(FULL_FEATURE_NAMES):
-        return list(FULL_FEATURE_NAMES)
     if count == len(LEGACY_FEATURE_NAMES):
         return list(LEGACY_FEATURE_NAMES)
+    if count == len(FEATURE_NAMES):
+        return list(FEATURE_NAMES)
     if count == len(FEATURE_NAMES_LIGHT):
         return list(FEATURE_NAMES_LIGHT)
-    if count < len(FULL_FEATURE_NAMES):
-        return list(FULL_FEATURE_NAMES[:count])
-    extra = [f"feature_{idx:03d}" for idx in range(len(FULL_FEATURE_NAMES), count)]
-    return list(FULL_FEATURE_NAMES) + extra
+    if count < len(FEATURE_NAMES):
+        return list(FEATURE_NAMES[:count])
+    extra = [f"feature_{idx:03d}" for idx in range(len(FEATURE_NAMES), count)]
+    return list(FEATURE_NAMES) + extra
 
 
 def _beta_stats(alpha: float, beta_p: float):
@@ -282,7 +285,7 @@ def _aggregate_shap(
     shap_vals: np.ndarray,
     feature_names: list[str] | None = None,
 ) -> Dict[str, float]:
-    names = feature_names or FULL_FEATURE_NAMES
+    names = feature_names or FEATURE_NAMES
     aggregated: Dict[str, float] = {}
     for idx, name in enumerate(names):
         if idx >= len(shap_vals):

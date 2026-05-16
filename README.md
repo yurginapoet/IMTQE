@@ -79,6 +79,11 @@ Used for:
 - detecting unnatural or grammatically incorrect phrases
 - highlighting low-probability word sequences
 
+Span localization sensitivity can be tuned without retraining:
+- `IMTQE_SPAN_BAD_THRESHOLD` controls when a token is highlighted as BAD based on `p(BAD)`
+- `IMTQE_SPAN_MAJOR_THRESHOLD` controls when a BAD token is marked as `BAD-major`
+- defaults: `0.45` and `0.60`
+
 ---
 
 ### 3. Structural Features

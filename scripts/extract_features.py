@@ -68,7 +68,7 @@ def extract_light_columns_for_df(
     checkpoint_every: int = 100,
 ) -> np.ndarray:
     """
-    Считает только лёгкие признаки (без LaBSE/ruGPT/MiniLM). Возвращает (n, len(columns_to_write)).
+    Считает только лёгкие признаки (без LaBSE/ruGPT). Возвращает (n, len(columns_to_write)).
     """
     n = len(df)
     out_dim = len(columns_to_write)
@@ -365,7 +365,7 @@ def main() -> None:
         action="store_true",
         help=(
             "Дописать только лёгкие признаки (spaCy structural/formatting/linguistic) в уже "
-            "существующий parquet, без LaBSE/ruGPT/MiniLM. Не удаляет и не пересчитывает "
+            "существующий parquet, без LaBSE/ruGPT. Не удаляет и не пересчитывает "
             "тяжёлые колонки. Требует совпадения строк и пар src/mt с входным файлом. "
             "С --force пересчитывает все лёгкие колонки поверх существующих."
         ),
@@ -386,7 +386,7 @@ def main() -> None:
         if list(extractor.active_feature_names) != list(SENTENCE_FEATURE_NAMES):
             raise RuntimeError(
                 "FeatureExtractor не активировал полный sentence-вектор. "
-                "Проверь наличие models/semantic_pca.pkl и доступность MiniLM."
+                "Проверь доступность LaBSE/ruGPT и согласованность схемы признаков."
             )
         log.info("Все модели загружены. Считаем %d признаков.", len(SENTENCE_FEATURE_NAMES))
 

@@ -1,9 +1,7 @@
 """
-Преобразование объяснений в «доли потери» относительно идеальной оценки 1.0.
+src/interpretation/explanation_loss.py
 
-Используется для UI: показываем только то, что тянет оценку вниз (или распределяем
-разрыв (1 − score) по attention нейронной головы), отбрасываем пренебрежимо малые
-доли и нормируем оставшееся к сумме 1.0.
+Преобразование SHAP объяснений в «доли потери» относительно идеальной оценки 1.0.
 """
 
 from __future__ import annotations
@@ -16,22 +14,28 @@ def shap_categories_to_loss_shares(
     min_share: float = 0.005,
 ) -> dict[str, float]:
     """
-    SHAP по MQM-категориям: отрицательный вклад = снижение score.
-    Берём max(0, −v), нормируем, отбрасываем категории с долей < min_share, снова нормируем.
-
-    Ключи на выходе — те же английские имена категорий (Accuracy, …), что и во входе.
+    Преобразует SHAP-вклады в доли потери качества.
+    Только отрицательные вклады (то, что тянет score вниз).
     """
     losses: dict[str, float] = {}
     for k, v in expl.items():
-        lv = max(0.0, -float(v))
-        if lv > 0.0:
-            losses[str(k)] = lv
-    total = sum(losses.values())
-    if total < 1e-12:
+        loss = max(0.0, -float(v))
+        if loss > 0.0:
+            losses[str(k)] = loss
+
+    total_loss = sum(losses.values())
+    if total_loss < 1e-8:
         return {}
-    shares = {k: v / total for k, v in losses.items()}
+
+    # Нормализация
+    shares = {k: v / total_loss for k, v in losses.items()}
+
+    # Отбрасываем очень маленькие доли
     filtered = {k: v for k, v in shares.items() if v >= float(min_share)}
-    t2 = sum(filtered.values())
-    if t2 < 1e-12:
+
+    total_filtered = sum(filtered.values())
+    if total_filtered < 1e-8:
         return {}
-    return {k: v / t2 for k, v in filtered.items()}
+
+    # Финальная нормализация
+    return {k: v / total_filtered for k, v in filtered.items()}

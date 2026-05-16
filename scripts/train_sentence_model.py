@@ -28,7 +28,7 @@ from src.determinism import seed_everything
 from src.settings import get_settings
 from src.features.interactions import add_interaction_columns_to_dataframe
 from src.features.schema import (
-    FEATURE_NAMES,
+    FEATURE_NAMES_CLASSIC,
     INTERACTION_FEATURE_NAMES,
     SENTENCE_FEATURE_NAMES,
 )
@@ -97,20 +97,25 @@ def build_shap_explainer(
 def get_feature_cols(df: pd.DataFrame) -> list[str]:
     """
     Берём признаки в порядке SENTENCE_FEATURE_NAMES, если parquet полный;
-    иначе — только базовые из FEATURE_NAMES (interaction добавит add_interaction_features).
+    иначе — только базовые из FEATURE_NAMES_CLASSIC
+    (interaction добавит add_interaction_features).
     """
     if all(f in df.columns for f in SENTENCE_FEATURE_NAMES):
         log.info("Parquet содержит полный sentence-вектор: %d признаков", len(SENTENCE_FEATURE_NAMES))
         return list(SENTENCE_FEATURE_NAMES)
-    available = [f for f in FEATURE_NAMES if f in df.columns]
-    missing = [f for f in FEATURE_NAMES if f not in df.columns]
+    available = [f for f in FEATURE_NAMES_CLASSIC if f in df.columns]
+    missing = [f for f in FEATURE_NAMES_CLASSIC if f not in df.columns]
     if missing:
         log.warning(
             "Отсутствуют признаки в датасете: %s\n"
             "Убедись что extract_features.py был запущен без --only и без флагов.",
             missing,
         )
-    log.info("Признаков (база): %d / %d; interaction будут добавлены в RAM", len(available), len(FEATURE_NAMES))
+    log.info(
+        "Признаков (база): %d / %d; interaction будут добавлены в RAM",
+        len(available),
+        len(FEATURE_NAMES_CLASSIC),
+    )
     return available
 
 
@@ -254,7 +259,6 @@ def train_xgboost(
     feature_cols: list[str],
     models_dir: Path,
     synthetic_weight: float = 0.12,
-    semantic_feature_weight: float = 1.0,
     seed: int = RANDOM_SEED,
 ) -> Any:
     train_df, val_df, test_df = _split_frames(df)
@@ -291,19 +295,6 @@ def train_xgboost(
 
     dtrain = xgb.DMatrix(X_train, label=y_train, weight=train_weights)
     dval   = xgb.DMatrix(X_val, label=y_val)
-
-    if semantic_feature_weight < 1.0:
-        fw = np.ones(len(feature_cols), dtype=np.float32)
-        for i, name in enumerate(feature_cols):
-            if str(name).startswith("semantic_"):
-                fw[i] = float(semantic_feature_weight)
-        dtrain.set_info(feature_weights=fw)
-        dval.set_info(feature_weights=fw)
-        log.info(
-            "semantic_* колонки: feature_weight=%.3f (реже попадают в colsample, "
-            "слабее доминирование PCA при <1.0)",
-            semantic_feature_weight,
-        )
 
     params = {
         "objective":        "reg:squarederror",
@@ -488,16 +479,6 @@ def main() -> None:
             "0.1 по умолчанию: synthetic negatives помогают, но не доминируют."
         ),
     )
-    parser.add_argument(
-        "--semantic-feature-weight",
-        type=float,
-        default=1.0,
-        help=(
-            "Вес колонок semantic_* в XGBoost feature_weights (subsampling). "
-            "1.0 = как раньше. Попробуй 0.25–0.45, чтобы PCA меньше перетягивал "
-            "деревья и SHAP был читабельнее (часто немного падает Pearson)."
-        ),
-    )
     args = parser.parse_args()
     seed_everything(args.seed)
 
@@ -518,7 +499,6 @@ def main() -> None:
         feature_cols,
         args.models_dir,
         synthetic_weight=args.synthetic_weight,
-        semantic_feature_weight=args.semantic_feature_weight,
         seed=args.seed,
     )
 

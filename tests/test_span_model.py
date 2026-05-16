@@ -13,6 +13,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import torch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -103,6 +104,28 @@ def test_build_word_spans_with_punctuation_tokens():
     spans = _build_word_spans(mt_text, ["Привет", ",", "мир", "!"])
     assert spans == [(0, 6), (6, 7), (8, 11), (11, 12)]
     print("✓ _build_word_spans: punctuation-aware токены корректно маппятся")
+
+
+def test_decode_words_uses_bad_threshold():
+    model = SpanModel.__new__(SpanModel)
+    model.bad_threshold = 0.45
+    model.major_threshold = 0.60
+
+    probs = torch.tensor([
+        [0.503, 0.297, 0.200],  # p(BAD)=0.497 -> BAD-minor при soft threshold
+        [0.450, 0.150, 0.400],  # p(BAD)=0.550 и p(major)=0.400 -> BAD-minor
+        [0.200, 0.100, 0.700],  # уверенный BAD-major
+    ])
+    labels, p_bad = model._decode_words(
+        probs=probs,
+        mt_start_pos=0,
+        word_to_first_subtoken=[0, 1, 2],
+        n_words=3,
+    )
+
+    assert labels == ["BAD-minor", "BAD-minor", "BAD-major"]
+    assert np.allclose(p_bad, [0.497, 0.55, 0.8], atol=1e-3)
+    print("✓ _decode_words: soft threshold подсвечивает borderline BAD")
 
 
 # ---------------------------------------------------------------------------

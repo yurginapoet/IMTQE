@@ -42,13 +42,13 @@ def load_predict_module():
     return importlib.import_module("src.predict")
 
 
-def test_predictor_requires_full_feature_set_for_semantic_model(tmp_path, monkeypatch):
+def test_predictor_requires_full_feature_set_for_sentence_model(tmp_path, monkeypatch):
     predict_mod = load_predict_module()
 
     class DummySentenceModel:
         def __init__(self, *_args, **_kwargs):
-            self.expected_feature_count = 86
-            self.feature_names = [f"f{i}" for i in range(86)]
+            self.expected_feature_count = 33
+            self.feature_names = [f"f{i}" for i in range(33)]
 
     class DummyFeatureExtractor:
         require_neural_calls = []
@@ -64,10 +64,10 @@ def test_predictor_requires_full_feature_set_for_semantic_model(tmp_path, monkey
     monkeypatch.setattr(predict_mod, "SpanModel", lambda *_args, **_kwargs: object())
     monkeypatch.setattr(predict_mod, "OverallSentenceEvaluator", lambda *_args, **_kwargs: object())
 
-    with pytest.raises(RuntimeError, match="нужно 86, доступно 22"):
+    with pytest.raises(RuntimeError, match="нужно 33, доступно 22"):
         predict_mod.Predictor(models_dir=tmp_path)
 
-    assert DummyFeatureExtractor.require_neural_calls == [True]
+    assert DummyFeatureExtractor.require_neural_calls == [False]
 
 
 def test_predict_sentence_passes_extractor_tokens_to_span_model(tmp_path, monkeypatch):
@@ -76,14 +76,14 @@ def test_predict_sentence_passes_extractor_tokens_to_span_model(tmp_path, monkey
 
     class DummyFeatureExtractor:
         def __init__(self, *_args, **_kwargs):
-            self.active_feature_names = [f"f{i}" for i in range(86)]
+            self.active_feature_names = [f"f{i}" for i in range(33)]
 
         def load_heavy_models(self, require_neural: bool = False):
             self.require_neural = require_neural
 
         def extract(self, src: str, mt: str) -> dict:
             return {
-                "vector": np.zeros(86, dtype=np.float32),
+                "vector": np.zeros(33, dtype=np.float32),
                 "formal_ratio": 0.0,
                 "word_logprobs": [-1.0, -2.0, -3.0, -4.0],
                 "mt_words": mt_words,
@@ -92,7 +92,7 @@ def test_predict_sentence_passes_extractor_tokens_to_span_model(tmp_path, monkey
 
     class DummySentenceModel:
         def __init__(self, *_args, **_kwargs):
-            self.expected_feature_count = 86
+            self.expected_feature_count = 33
             self.feature_names = ["f0", "f1"]
 
         def predict(self, _features):

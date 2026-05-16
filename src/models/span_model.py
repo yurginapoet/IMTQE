@@ -29,6 +29,7 @@ word_logprobs (из fluency.py / Блока 1) передаётся для бу�
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Sequence
@@ -45,6 +46,8 @@ LABEL2ID = {"OK": 0, "BAD-minor": 1, "BAD-major": 2}
 ID2LABEL = {v: k for k, v in LABEL2ID.items()}
 MAX_LENGTH = 512
 _OK_ID = LABEL2ID["OK"]
+DEFAULT_BAD_THRESHOLD = 0.45
+DEFAULT_MAJOR_THRESHOLD = 0.60
 
 
 # ---------------------------------------------------------------------------
@@ -96,6 +99,22 @@ class SpanModel:
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = torch.device(device)
+        self.bad_threshold = _read_probability_threshold(
+            "IMTQE_SPAN_BAD_THRESHOLD",
+            DEFAULT_BAD_THRESHOLD,
+        )
+        self.major_threshold = _read_probability_threshold(
+            "IMTQE_SPAN_MAJOR_THRESHOLD",
+            DEFAULT_MAJOR_THRESHOLD,
+        )
+        if self.major_threshold < self.bad_threshold:
+            log.warning(
+                "IMTQE_SPAN_MAJOR_THRESHOLD=%.3f ниже IMTQE_SPAN_BAD_THRESHOLD=%.3f; "
+                "major-порог будет поднят до bad-порога",
+                self.major_threshold,
+                self.bad_threshold,
+            )
+            self.major_threshold = self.bad_threshold
 
         log.info("SpanModel: загрузка из %s на %s", model_dir, self.device)
         self.tokenizer = AutoTokenizer.from_pretrained(str(model_dir), local_files_only=True)
@@ -105,7 +124,12 @@ class SpanModel:
         ).to(self.device).eval()
 
         total = sum(p.numel() for p in self.model.parameters())
-        log.info("SpanModel загружена: %.1fM параметров", total / 1e6)
+        log.info(
+            "SpanModel загружена: %.1fM параметров; bad_threshold=%.2f major_threshold=%.2f",
+            total / 1e6,
+            self.bad_threshold,
+            self.major_threshold,
+        )
 
     # ------------------------------------------------------------------
     # Публичный метод
@@ -262,8 +286,13 @@ class SpanModel:
         for i in range(n_words):
             if i in word_probs_tensor:
                 p = word_probs_tensor[i]
-                label_id = int(p.argmax().item())
+                p_minor = float(p[LABEL2ID["BAD-minor"]].item())
+                p_major = float(p[LABEL2ID["BAD-major"]].item())
                 p_bad    = float((p[LABEL2ID["BAD-minor"]] + p[LABEL2ID["BAD-major"]]).item())
+                if p_bad >= self.bad_threshold:
+                    label_id = LABEL2ID["BAD-major"] if p_major >= self.major_threshold else LABEL2ID["BAD-minor"]
+                else:
+                    label_id = _OK_ID
             else:
                 # токен не попал в окно — консервативно OK
                 label_id = _OK_ID
@@ -428,3 +457,18 @@ def _validate_model_dir(model_dir: Path) -> None:
             f"{model_dir}. Не найдены: {', '.join(missing)}. "
             "Переобучи/пересохрани модель через scripts/train_span_model.py."
         )
+
+
+def _read_probability_threshold(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        log.warning("%s=%r не число; используем значение по умолчанию %.2f", name, raw, default)
+        return default
+    if not 0.0 <= value <= 1.0:
+        log.warning("%s=%.3f вне диапазона [0,1]; используем значение по умолчанию %.2f", name, value, default)
+        return default
+    return value

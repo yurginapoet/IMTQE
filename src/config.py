@@ -15,7 +15,6 @@ class Config:
 
     LABSE_MODEL_NAME = "sentence-transformers/LaBSE"
     RUGPT_MODEL_NAME = "sberbank-ai/rugpt3small_based_on_gpt2"
-    SEMANTIC_ENCODER_NAME = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 
     @staticmethod
     def models_dir() -> Path:
@@ -28,10 +27,6 @@ class Config:
     @staticmethod
     def processed_dir() -> Path:
         return get_settings().processed_dir
-
-    @staticmethod
-    def semantic_pca_path() -> Path:
-        return get_settings().models_dir / "semantic_pca.pkl"
 
     @staticmethod
     def hf_local_files_only() -> bool:

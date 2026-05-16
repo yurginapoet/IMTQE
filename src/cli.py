@@ -14,11 +14,9 @@ STEP_SCRIPTS: dict[str, str] = {
     "build-wordlevel": "build_wordlevel.py",
     "dedup-mqm": "dedup_mqm.py",
     "build-synthetic-negatives": "build_synthetic_negatives.py",
-    "train-semantic-pca": "train_semantic_pca.py",
     "extract-features": "extract_features.py",
     "train-sentence": "train_sentence_model.py",
     "train-span": "train_span_model.py",
-    "train-neural-head": "train_neural_head.py",
     "warmup-inference": "warmup_inference_models.py",
 }
 

@@ -32,7 +32,6 @@ def main() -> None:
     parser.add_argument("--skip-span", action="store_true")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--max-synth-rows", type=int, default=None)
-    parser.add_argument("--max-pca-rows", type=int, default=None)
     args = parser.parse_args()
 
     py = sys.executable
@@ -72,18 +71,6 @@ def main() -> None:
                 "--data-dir", str(args.data_dir),
                 "--seed", str(args.seed),
                 *([ "--max-rows", str(args.max_synth_rows) ] if args.max_synth_rows is not None else []),
-                *force_flag,
-            ],
-        ),
-        (
-            "Train Semantic PCA",
-            [
-                py, "scripts/train_semantic_pca.py",
-                "--data-dir", str(args.data_dir),
-                "--models-dir", str(args.models_dir),
-                "--seed", str(args.seed),
-                "--batch-size", str(max(args.batch_size, 128)),
-                *([ "--max-rows", str(args.max_pca_rows) ] if args.max_pca_rows is not None else []),
                 *force_flag,
             ],
         ),
