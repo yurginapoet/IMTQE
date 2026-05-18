@@ -28,4 +28,11 @@ Random Forest — `n_estimators`, `max_depth`, `min_samples_leaf`, `max_features
 
 Второй риск — время. XGBoost с 4000 деревьями на каждый trial медленный. Нужно либо ограничить `num_boost_round` во время поиска (например, 1000), либо использовать `XGBRegressor` с `early_stopping_rounds` внутри optuna callback.
 
-Хочешь я напишу скрипт `scripts/tune_ensemble.py` который делает всё это — параллельный поиск гиперпараметров для трёх моделей через optuna и последующую оптимизацию весов ансамбля?
+Хочешь я напишу скрипт `scripts/tune_ensemble.py` который делает всё это — параллельный поиск гиперпараметров для трёх моделей через optuna и последующую оптимизацию весов ансамбля?    
+
+
+21:36:08  INFO  __mp_main__  [xgboost] Лучший trial #34: CV Pearson=0.8219, params={'learning_rate': 0.03494340983920317, 'max_depth': 6, 'min_child_weight': 3, 'subsample': 0.8919802732741521, 'colsample_bytree': 0.9526101587075015, 'reg_lambda': 9.63635810298425, 'reg_alpha': 0.00891493807417657, 'gamma': 0.003291999108334797, 'num_round': 2367}
+
+4:14:22  INFO  __mp_main__  [ridge] Лучший trial #27: CV Pearson=0.7580, params={'alpha': 0.5877857271827573}
+
+15:44:39  INFO  __main__  [rf] Лучший trial #18: CV Pearson=0.8478, params={'n_estimators': 559, 'max_depth': 18, 'min_samples_leaf': 2, 'max_features': 0.6229833876408214}
